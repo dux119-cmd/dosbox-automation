@@ -5,283 +5,1077 @@
 
 set -euo pipefail
 
-PORT="${DOSBOX_PORT:-8386}"
-BASE_URL="http://127.0.0.1:$PORT"
-TOKEN_FILE="${HOME}/.config/dosbox-automation/webserver/api_token"
+readonly DEFAULT_PORT=8386
+readonly TEXT_MAX=4096
+readonly KEY_GAP_MS=50
+readonly MAX_HOLD_MS=60000
 
-resolve_token() {
-    if [[ -n "${DOSBOX_API_TOKEN:-}" ]]; then
-        echo "$DOSBOX_API_TOKEN"
-        return
-    fi
-    if [[ -f "$TOKEN_FILE" ]]; then
-        cat "$TOKEN_FILE"
-        return
-    fi
-    echo "error: no token (set DOSBOX_API_TOKEN or start dosbox with webserver_token_file=true)" >&2
-    return 1
-}
-
-api() {
-    local token
-    token="$(resolve_token)" || exit 1
-    local path="$1"; shift
-    curl -s -H "Authorization: Bearer $token" "${BASE_URL}${path}" "$@"
-}
-
-api_post() {
-    local path="$1"; shift
-    api "$path" -X POST "$@"
-}
+JSON_OUTPUT=0
+# wait looks for a token file until its timeout: the engine writes it only
+# once its webserver is up.
+TOKEN_WAIT=0
+TOKEN_MISSING=""
+PYTHON=""
+BASE_URL=""
+WORK_DIR=""
 
 usage() {
     cat <<'USAGE'
-dosboxctl - command line interface for dosbox-automation
+dosboxctl - command line client for the dosbox-automation REST API
 
-Usage: dosboxctl <command> [args]
+Usage: dosboxctl [--json] <command> [args]
 
-Session:
-  status                    API status
-  info                      Version and capabilities
-  shutdown                  Shut down the emulator
-
-Screen:
-  screen                    Print screen text (text mode only)
-  frame [file] [options]    Capture frame to file (default: frame.png)
-    --mode raw|rendered       Capture mode (default: raw)
-    --format png|jpeg         Image format (default: png)
-
-Input:
-  type <text>               Type text (appends Enter)
-  key <name>                Press and release a key (e.g. enter, down, f1)
-  keys <name> [count]       Press a key N times (default: 1)
-
-Lua scripting:
-  run <code>                Load and run a Lua snippet
-  file <path.lua>           Load and run a Lua file
-  script-status             Script state and output
-  script-stop               Stop running script
-  wait <text> [frames]      Wait for text on screen (default: 1800 frames)
-
-Recording:
-  record-start [mode]       Start video capture (raw or rendered, default: raw)
-  record-stop               Stop video capture
-  record-status             Capture status
-
-Drives:
-  swap <drive> <image>      Swap a floppy or CD image
-  mount-lock                Lock mount configuration
+  --json                    Print the API answer unchanged
 
 Environment:
-  DOSBOX_API_TOKEN          API token (overrides token file)
-  DOSBOX_PORT               API port (default: 8386)
+  DOSBOX_API_URL            Base URL, loopback only (default http://127.0.0.1:8386)
+  DOSBOX_PORT               Port when DOSBOX_API_URL is not set
+  DOSBOX_API_TOKEN          API token, 64 hex characters
+  DOSBOX_TOKEN_FILE         File holding the token
+  Without both, the engine's token file in its config directory is read
+  (written when the engine runs with webserver_token_file=true).
 
-Key names use the KBD_ prefix internally. dosboxctl adds it for you,
-so "dosboxctl key enter" works (sends KBD_enter).
+Exit codes: 0 success, 1 API or connection error, 2 usage error.
+Needs bash, curl and python3. On Windows run it from Git Bash, MSYS2 or WSL.
+
+Session:
+  status                    Engine status
+  info                      Version and features
+  program                   Running program
+  shutdown                  Shut the engine down
+
+Screen:
+  screen                    Screen text (text modes only)
+  screen-info               Video mode and frame geometry
+  frame [file] [options]    Save the current frame (default frame.png)
+      --mode raw|rendered     Framebuffer or what the window shows (default raw)
+      --format png|jpeg|raw   Image format (default png)
+      --quality 1-100         JPEG quality
+  wait <text> [seconds]     Wait until text is on screen (default 30 s), also while the
+                            engine is still starting; exit 1 on timeout
+
+Input (returns when the input has been delivered):
+  type [--no-enter] [--cps N] <text>
+                            Type text, Enter at the end unless --no-enter
+  key <name> [count] [--hold MS]
+                            Press and release a key (enter, esc, f1, up, a, ...);
+                            --hold keeps it down MS ms, so it repeats like a held key
+  keys <name>[:MS]...       Several keys in order, each held MS ms if given:
+                            keys right:900 leftctrl:300 space
+  mouse move <dx> <dy>      Move the mouse relative
+  mouse click left|right|middle
+
+Memory and CPU (an address is linear, 0x400, or seg:off, 0x40:0x0; mem read
+and mem write also take a segment register, cs:0x100):
+  mem read <addr> <len>     Hex dump
+  mem write <addr> <hex>... Write bytes, e.g. 01 02 or 0102
+  mem search <value> <start> <end> [--width 1|2|4]
+                            Addresses holding the value (span up to 16 MiB)
+  mem alloc <size> [--area conv|uma|xms] [--strategy first_fit|best_fit|last_fit]
+  mem free <addr>
+  freeze add <addr> <value> [--width 1|2|4]
+  freeze list
+  freeze clear [addr]       All freezes, or the one at addr
+  regs                      CPU registers
+  reg set <name> <value>    eax..ebp, cs, ds, es, ss, fs, gs
+  cycles [N]                Cycles in force, or set fixed cycles
+  port read <port> [--width 1|2]
+  port write <port> <value> [--width 1|2]
+  dos-internals             DOS lists, MCB chain
+
+Drives:
+  swap <drive> <image>      Swap a floppy or CD image (mount policy applies)
+  mount-lock [status]       Lock mounts and swaps until restart, or show the lock
+
+Lua scripts:
+  run <code>                Load and start a Lua snippet
+  file <path.lua>           Load and start a Lua file
+  script-status             State and dosbox.output values
+  script-stop               Stop the running script
+
+Capture and recording:
+  video start [raw|rendered]
+  video stop
+  video status
+  video compression [raw N] [rendered N]
+                            zlib levels 0-9; without arguments show them
+  audio start [name]        WAV in the capture directory, numbered or a new name
+  audio stop
+  audio status
+  input-record start|pause|stop|status
+  record-start, record-stop, record-status
+                            Old names of video start, stop, status
+
+Mixer:
+  mixer                     Master volume, mute, channels
+  mixer volume <left> <right>
+  mixer mute
+  mixer unmute
+  mixer channel <name> <left> <right>
+
 USAGE
+}
+
+die() {
+    printf 'dosboxctl: %s\n' "$1" >&2
     exit 1
 }
 
+usage_error() {
+    printf 'dosboxctl: %s\n\n' "$1" >&2
+    usage >&2
+    exit 2
+}
+
+# JSON is built and read only here, from argv and files, never by splicing
+# text into JSON or Lua.
+read -r -d '' PY_HELPER <<'PYEOF' || true
+import base64, ipaddress, json, sys
+from urllib.parse import urlsplit
+
+def scalar(v):
+    return json.dumps(v, ensure_ascii=False) if not isinstance(v, str) else v
+
+def flatten(prefix, v, out):
+    if isinstance(v, dict):
+        for k in sorted(v):
+            flatten(f"{prefix}.{k}" if prefix else k, v[k], out)
+    elif isinstance(v, list) and any(isinstance(x, (dict, list)) for x in v):
+        for i, x in enumerate(v):
+            flatten(f"{prefix}[{i}]", x, out)
+    elif isinstance(v, list):
+        out.append(f"{prefix}: {json.dumps(v)}")
+    else:
+        out.append(f"{prefix}: {scalar(v)}")
+
+def load(path):
+    with open(path, encoding="utf-8") as f:
+        return json.load(f)
+
+def cmd_body(args):
+    body = {}
+    for spec, value in zip(args[::2], args[1::2]):
+        kind, key = spec.split(":", 1)
+        if kind == "s":
+            body[key] = value
+        elif kind == "i":
+            body[key] = int(value, 16 if value.lstrip("+-")[:2] in ("0x", "0X") else 10)
+        elif kind == "f":
+            body[key] = float(value)
+        else:
+            raise SystemExit(f"bad body spec {spec}")
+    sys.stdout.write(json.dumps(body))
+
+def taps(kind, field, items, gap):
+    """items: (name, hold_ms); each press follows the last release by gap."""
+    events = []
+    for name, hold in items:
+        press = {"type": kind, field: name, "pressed": True}
+        if events:
+            press["delay_ms"] = gap
+        events.append(press)
+        events.append({"type": kind, field: name, "pressed": False, "delay_ms": hold})
+    return events
+
+def cmd_keys(args):
+    items = [(spec.rsplit(":", 1)[0], float(spec.rsplit(":", 1)[1])) for spec in args[1:]]
+    events = taps("key", "key", items, float(args[0]))
+    sys.stdout.write(json.dumps({"events": events}))
+
+def cmd_click(args):
+    events = taps("mouse_button", "button", [(args[1], float(args[0]))], float(args[0]))
+    sys.stdout.write(json.dumps({"events": events}))
+
+def cmd_move(args):
+    event = {"type": "mouse_move", "x_rel": float(args[0]), "y_rel": float(args[1])}
+    sys.stdout.write(json.dumps({"events": [event]}))
+
+def cmd_print(args):
+    data = load(args[0])
+    out = []
+    flatten("", data, out)
+    print("\n".join(out))
+
+def cmd_regs(args):
+    regs = load(args[0])["registers"]
+    for name in sorted(regs):
+        print(f"{name}: 0x{regs[name]:08x}")
+
+def cmd_screen(args):
+    lines = [ln.rstrip() for ln in load(args[0]).get("text", "").split("\n")]
+    while lines and not lines[-1]:
+        lines.pop()
+    print("\n".join(lines))
+
+def cmd_on_screen(args):
+    raise SystemExit(0 if args[1] in load(args[0]).get("text", "") else 1)
+
+def cmd_hexdump(args):
+    memory = load(args[0])["memory"]
+    data, start = base64.b64decode(memory["data"]), memory["addr"]
+    for i in range(0, len(data), 16):
+        print(f"{start + i:08x}: " + " ".join(f"{b:02x}" for b in data[i:i + 16]))
+
+def cmd_hexbytes(args):
+    text = "".join(args[1:])
+    try:
+        data = bytes.fromhex(text)
+    except ValueError:
+        raise SystemExit(2)
+    if not data:
+        raise SystemExit(2)
+    with open(args[0], "wb") as f:
+        f.write(data)
+
+def cmd_matches(args):
+    data = load(args[0])
+    for addr in data.get("matches", []):
+        print(f"{addr:08x}")
+    for r in data.get("skipped", []):
+        print(f"skipped unmapped 0x{r['start']:x}-0x{r['end']:x}", file=sys.stderr)
+
+def cmd_error(args):
+    try:
+        data = load(args[0])
+        text = data.get("error", "") if isinstance(data, dict) else ""
+    except (ValueError, OSError):
+        with open(args[0], encoding="utf-8", errors="replace") as f:
+            text = f.read().strip()
+    print(text)
+
+def cmd_retry_after(args):
+    for line in open(args[0], encoding="latin-1"):
+        name, _, value = line.partition(":")
+        if name.strip().lower() == "retry-after" and value.strip().isdigit():
+            print(min(int(value.strip()), 10))
+            return
+    print(0)
+
+def cmd_check_url(args):
+    url = args[0]
+    parts = urlsplit(url)
+    host = parts.hostname
+    if parts.scheme not in ("http", "https") or not host:
+        raise SystemExit(f"DOSBOX_API_URL must be an http or https URL: {url}")
+    if host != "localhost":
+        try:
+            loop = ipaddress.ip_address(host).is_loopback
+        except ValueError:
+            loop = False
+        if not loop:
+            raise SystemExit(f"DOSBOX_API_URL is not a loopback address: {host}")
+    print(url.rstrip("/"))
+
+COMMANDS = {name[4:]: fn for name, fn in globals().items() if name.startswith("cmd_")}
+COMMANDS[sys.argv[1]](sys.argv[2:])
+PYEOF
+
+py() {
+    "$PYTHON" -c "$PY_HELPER" "$@"
+}
+
+find_python() {
+    local candidate
+    for candidate in python3 python; do
+        if command -v "$candidate" >/dev/null 2>&1 &&
+            "$candidate" -c 'import sys; sys.exit(sys.version_info < (3, 8))' 2>/dev/null; then
+            PYTHON="$candidate"
+            return
+        fi
+    done
+    die "python3 not found"
+}
+
+is_number() {
+    [[ "$1" =~ ^(0[xX][0-9a-fA-F]+|[0-9]+)$ ]]
+}
+
+# to_int N: a leading zero stays decimal, as the engine reads it, not octal.
+to_int() {
+    if [[ "$1" == 0[xX]* ]]; then
+        printf '%d' "$(($1))"
+    else
+        printf '%d' "$((10#$1))"
+    fi
+}
+
+is_float() {
+    [[ "$1" =~ ^[0-9]+(\.[0-9]+)?$ ]]
+}
+
+need_number() {
+    is_number "$2" || usage_error "$1 must be a number (decimal or 0x hex): $2"
+}
+
+need_args() {
+    local want="$1" have="$2" what="$3"
+    ((have >= want)) || usage_error "$what"
+}
+
+default_token_file() {
+    local dir
+    case "$(uname -s)" in
+        Darwin)
+            dir="$HOME/Library/Preferences"
+            ;;
+        MINGW* | MSYS* | CYGWIN*)
+            if [[ -n "${XDG_CONFIG_HOME:-}" ]]; then
+                dir="$XDG_CONFIG_HOME"
+            elif [[ -n "${LOCALAPPDATA:-}" ]]; then
+                dir="$LOCALAPPDATA"
+                if command -v cygpath >/dev/null 2>&1; then
+                    dir="$(cygpath -u "$dir")"
+                fi
+            else
+                die "LOCALAPPDATA is not set"
+            fi
+            ;;
+        *)
+            dir="${XDG_CONFIG_HOME:-$HOME/.config}"
+            ;;
+    esac
+    printf '%s/dosbox-automation/webserver/api_token' "$dir"
+}
+
+resolve_token() {
+    local token file
+    if [[ -n "${DOSBOX_API_TOKEN:-}" ]]; then
+        token="$DOSBOX_API_TOKEN"
+    else
+        if [[ -n "${DOSBOX_TOKEN_FILE:-}" ]]; then
+            file="$DOSBOX_TOKEN_FILE"
+            TOKEN_MISSING="DOSBOX_TOKEN_FILE does not exist: $file"
+        else
+            file="$(default_token_file)"
+            TOKEN_MISSING="no token: set DOSBOX_API_TOKEN or DOSBOX_TOKEN_FILE, or start the engine with webserver_token_file=true (looked for $file)"
+        fi
+        if [[ ! -f "$file" ]]; then
+            ((TOKEN_WAIT)) && return 1
+            die "$TOKEN_MISSING"
+        fi
+        token="$(tr -d ' \r\n\t' <"$file")"
+    fi
+    # Also keeps a stray newline or header text out of the curl config.
+    [[ "$token" =~ ^[0-9a-fA-F]{64}$ ]] || die "the API token must be 64 hex characters"
+    printf 'header = "Authorization: Bearer %s"\n' "$token" >"$WORK_DIR/auth"
+}
+
+setup() {
+    find_python
+    command -v curl >/dev/null 2>&1 || die "curl not found"
+    local url="${DOSBOX_API_URL:-}"
+    if [[ -z "$url" ]]; then
+        local port="${DOSBOX_PORT:-$DEFAULT_PORT}"
+        [[ "$port" =~ ^[0-9]+$ ]] || die "DOSBOX_PORT must be a number: $port"
+        url="http://127.0.0.1:$port"
+    fi
+    BASE_URL="$(py check_url "$url")" || exit 1
+    umask 077
+    WORK_DIR="$(mktemp -d)"
+    trap 'rm -rf "$WORK_DIR"' EXIT
+    resolve_token || true
+}
+
+# request METHOD PATH [CONTENT_TYPE] [ACCEPT]: the body on stdin with a
+# CONTENT_TYPE, the answer in $WORK_DIR/out; a busy engine (503 with
+# Retry-After) is asked again for up to ten seconds.
+request() {
+    local method="$1" path="$2" ctype="${3:-}" accept="${4:-}"
+    local body_file="$WORK_DIR/body" status wait deadline=$((SECONDS + 10))
+    local args=(-sS --connect-timeout 5 --max-time 60 -K "$WORK_DIR/auth"
+        -X "$method" -o "$WORK_DIR/out" -D "$WORK_DIR/headers" -w '%{http_code}')
+    if [[ -n "$ctype" ]]; then
+        cat >"$body_file"
+        args+=(-H "Content-Type: $ctype" --data-binary "@$body_file")
+    fi
+    [[ -n "$accept" ]] && args+=(-H "Accept: $accept")
+    while true; do
+        status="$(curl "${args[@]}" "$BASE_URL$path")" ||
+            die "cannot reach $BASE_URL (is the engine running with webserver_enabled=true?)"
+        if [[ "$status" == 503 ]] && ((SECONDS < deadline)); then
+            wait="$(py retry_after "$WORK_DIR/headers")"
+            if ((wait > 0)); then
+                sleep "$wait"
+                continue
+            fi
+        fi
+        break
+    done
+    if ((status >= 400)); then
+        local text
+        text="$(py error "$WORK_DIR/out")"
+        die "HTTP $status${text:+: $text} ($method $path)"
+    fi
+}
+
+json_request() {
+    local method="$1" path="$2"
+    shift 2
+    py body "$@" | request "$method" "$path" application/json
+}
+
+show() {
+    if ((JSON_OUTPUT)) || [[ ! -s "$WORK_DIR/out" ]]; then
+        cat "$WORK_DIR/out"
+        [[ -s "$WORK_DIR/out" ]] && printf '\n'
+        return 0
+    fi
+    py "${1:-print}" "$WORK_DIR/out"
+}
+
+say() {
+    if ((JSON_OUTPUT)); then
+        show
+    else
+        printf '%s\n' "$1"
+    fi
+}
+
+# Input sent while a sequence is still being typed is refused with 409, so
+# every input command waits for the queue before and after.
+wait_input_idle() {
+    local deadline=$((SECONDS + 60)) status
+    while ((SECONDS < deadline)); do
+        status="$(printf '{"events": []}' | curl -sS --connect-timeout 5 --max-time 10 \
+            -K "$WORK_DIR/auth" -X POST -H "Content-Type: application/json" \
+            --data-binary @- -o /dev/null -w '%{http_code}' \
+            "$BASE_URL/api/v1/input/sequence")" || die "cannot reach $BASE_URL"
+        [[ "$status" == 200 ]] && return 0
+        [[ "$status" == 409 || "$status" == 503 ]] || die "HTTP $status while waiting for input"
+        sleep 0.1
+    done
+    die "input still being delivered after 60 s"
+}
+
+key_name() {
+    local name="${1#KBD_}"
+    [[ "$name" =~ ^[A-Za-z0-9_]+$ ]] || usage_error "bad key name: $1"
+    printf 'KBD_%s' "$name"
+}
+
+# key_spec NAME[:MS]: "KBD_NAME:MS", the hold defaulting to a short tap.
+key_spec() {
+    local spec="$1" hold="$KEY_GAP_MS"
+    if [[ "$spec" == *:* ]]; then
+        hold="${spec#*:}"
+        if [[ ! "$hold" =~ ^[0-9]+$ ]] || ((10#$hold < 1 || 10#$hold > MAX_HOLD_MS)); then
+            usage_error "hold must be 1 to $MAX_HOLD_MS ms: $spec"
+        fi
+        hold=$((10#$hold))
+    fi
+    local name
+    # Substitutions do not inherit set -e, and macOS bash 3.2 has no inherit_errexit.
+    name="$(key_name "${spec%%:*}")" || exit $?
+    printf '%s:%s' "$name" "$hold"
+}
+
+# addr_path ADDR LEN_OR_EMPTY: the memory route path for linear or seg:off.
+addr_path() {
+    local addr="$1" seg off
+    if [[ "$addr" == *:* ]]; then
+        seg="${addr%%:*}"
+        off="${addr#*:}"
+        need_number offset "$off"
+        if [[ ! "$seg" =~ ^([cCdDeEsSfFgG][sS])$ ]]; then
+            need_number segment "$seg"
+        fi
+        printf '/api/v1/memory/%s/%s' "$seg" "$off"
+    else
+        need_number address "$addr"
+        printf '/api/v1/memory/%s' "$addr"
+    fi
+}
+
+# linear ADDR: seg:off with a numeric segment, or a linear address.
+linear() {
+    local addr="$1" seg off
+    if [[ "$addr" == *:* ]]; then
+        seg="${addr%%:*}"
+        off="${addr#*:}"
+        need_number segment "$seg"
+        need_number offset "$off"
+        printf '%d' "$(($(to_int "$seg") * 16 + $(to_int "$off")))"
+    else
+        need_number address "$addr"
+        to_int "$addr"
+    fi
+}
+
+width_option() {
+    local allowed="$1" value="$2"
+    [[ " $allowed " == *" $value "* ]] || usage_error "--width must be one of: $allowed"
+}
+
 cmd_status() {
-    api /api/v1/status | python3 -c "
-import sys, json
-d = json.load(sys.stdin)
-for k, v in sorted(d.items()):
-    print(f'{k}: {v}')
-"
+    request GET /api/v1/status
+    show
 }
 
 cmd_info() {
-    api /api/v1/dosbox/info | python3 -c "
-import sys, json
-d = json.load(sys.stdin)
-for k, v in sorted(d.items()):
-    if isinstance(v, dict):
-        print(f'{k}:')
-        for kk, vv in sorted(v.items()):
-            print(f'  {kk}: {vv}')
-    else:
-        print(f'{k}: {v}')
-"
+    request GET /api/v1/dosbox/info
+    show
+}
+
+cmd_program() {
+    request GET /api/v1/program/state
+    show
 }
 
 cmd_shutdown() {
-    api_post /api/v1/dosbox/shutdown >/dev/null 2>&1
-    echo "shutdown sent"
+    request POST /api/v1/dosbox/shutdown
+    say "shutdown sent"
 }
 
 cmd_screen() {
-    api /api/v1/video/text | python3 -c "
-import sys, json
-d = json.load(sys.stdin)
-for line in d.get('text', '').splitlines():
-    s = line.rstrip()
-    if s:
-        print(s)
-"
+    request GET /api/v1/video/text
+    show screen
+}
+
+cmd_screen_info() {
+    request GET /api/v1/video/frame/info
+    show
 }
 
 cmd_frame() {
-    local out="frame.png"
-    local mode="raw"
-    local fmt="png"
-
-    while [[ $# -gt 0 ]]; do
+    local out="frame.png" mode="raw" fmt="png" quality="" query
+    while (($#)); do
         case "$1" in
-            --mode)   mode="$2"; shift 2 ;;
-            --format) fmt="$2"; shift 2 ;;
-            -*)       echo "unknown option: $1" >&2; exit 1 ;;
-            *)        out="$1"; shift ;;
+            --mode)
+                need_args 2 $# "--mode needs a value"
+                mode="$2"
+                shift 2
+                ;;
+            --format)
+                need_args 2 $# "--format needs a value"
+                fmt="$2"
+                shift 2
+                ;;
+            --quality)
+                need_args 2 $# "--quality needs a value"
+                quality="$2"
+                shift 2
+                ;;
+            -*) usage_error "unknown frame option: $1" ;;
+            *)
+                out="$1"
+                shift
+                ;;
         esac
     done
-
-    local token
-    token="$(resolve_token)" || exit 1
-    curl -s -H "Authorization: Bearer $token" \
-        "${BASE_URL}/api/v1/video/frame?format=${fmt}&mode=${mode}" \
-        -o "$out"
-    echo "saved: $out (mode=$mode, format=$fmt)"
-}
-
-cmd_type() {
-    local text="$*"
-    api_post /api/v1/input/type \
-        -H "Content-Type: application/json" \
-        -d "{\"text\": \"${text}\\n\"}" >/dev/null
-}
-
-cmd_key() {
-    local name="$1"
-    api_post /api/v1/input/sequence \
-        -H "Content-Type: application/json" \
-        -d "{\"events\": [
-            {\"type\": \"key\", \"key\": \"KBD_${name}\", \"pressed\": true},
-            {\"type\": \"delay\", \"ms\": 100},
-            {\"type\": \"key\", \"key\": \"KBD_${name}\", \"pressed\": false}
-        ]}" >/dev/null
-}
-
-cmd_keys() {
-    local name="$1"
-    local count="${2:-1}"
-    for (( i = 0; i < count; i++ )); do
-        cmd_key "$name"
-        sleep 0.15
-    done
-}
-
-cmd_run() {
-    local code="$*"
-    api_post /api/v1/script/load \
-        -H "Content-Type: text/plain" \
-        -d "$code" >/dev/null
-    api_post /api/v1/script/start >/dev/null
-}
-
-cmd_file() {
-    local path="$1"
-    if [[ ! -f "$path" ]]; then
-        echo "error: file not found: $path" >&2
-        exit 1
+    [[ "$mode" == raw || "$mode" == rendered ]] || usage_error "--mode must be raw or rendered"
+    [[ "$fmt" == png || "$fmt" == jpeg || "$fmt" == raw ]] || usage_error "--format must be png, jpeg or raw"
+    query="format=$fmt&mode=$mode"
+    if [[ -n "$quality" ]]; then
+        if [[ ! "$quality" =~ ^[0-9]+$ ]] || ((quality < 1 || quality > 100)); then
+            usage_error "--quality must be 1 to 100"
+        fi
+        query+="&quality=$quality"
     fi
-    api_post /api/v1/script/load \
-        -H "Content-Type: text/plain" \
-        --data-binary "@$path" >/dev/null
-    api_post /api/v1/script/start >/dev/null
-}
-
-cmd_script_status() {
-    api /api/v1/script/status | python3 -c "
-import sys, json
-d = json.load(sys.stdin)
-print(f\"state: {d.get('state', '?')}\")
-if d.get('error'):
-    print(f\"error: {d['error']}\")
-out = d.get('output', {})
-if out:
-    for k, v in sorted(out.items()):
-        print(f'  {k} = {v}')
-"
-}
-
-cmd_script_stop() {
-    api_post /api/v1/script/stop >/dev/null
-    echo "script stopped"
+    request GET "/api/v1/video/frame?$query"
+    cp "$WORK_DIR/out" "$out"
+    say "saved $out ($(wc -c <"$out" | tr -d ' ') bytes, $fmt, $mode)"
 }
 
 cmd_wait() {
-    local text="$1"
-    local timeout="${2:-1800}"
-    cmd_run "dosbox.wait_for_text(\"$text\", $timeout)"
+    need_args 1 $# "wait needs the text to wait for"
+    local text="$1" seconds="${2:-30}" start=$SECONDS
+    [[ "$seconds" =~ ^[0-9]+$ ]] || usage_error "wait seconds must be a whole number"
+    while true; do
+        if [[ ! -s "$WORK_DIR/auth" ]] && ! resolve_token; then
+            wait_over "$start" "$seconds" && die "$TOKEN_MISSING (waited $seconds s)"
+            sleep 0.2
+            continue
+        fi
+        if engine_answers && read_screen_for_wait &&
+            py on_screen "$WORK_DIR/out" "$text"; then
+            return 0
+        fi
+        if wait_over "$start" "$seconds"; then
+            engine_answers ||
+                die "cannot reach $BASE_URL after $seconds s (is the engine running with webserver_enabled=true?)"
+            die "not on screen after $seconds s: $text"
+        fi
+        sleep 0.2
+    done
 }
 
-cmd_record_start() {
-    local mode="${1:-raw}"
-    if [[ "$mode" != "raw" && "$mode" != "rendered" ]]; then
-        echo "error: mode must be 'raw' or 'rendered'" >&2
-        exit 1
+# The screen for cmd_wait: a busy engine (503) or a screen the guest has not
+# mapped (409) is not on screen yet; the wait's own limit decides.
+read_screen_for_wait() {
+    local status text
+    status="$(curl -sS --connect-timeout 5 --max-time 60 -K "$WORK_DIR/auth" \
+        -o "$WORK_DIR/out" -w '%{http_code}' "$BASE_URL/api/v1/video/text")" || return 1
+    [[ "$status" == 200 ]] && return 0
+    [[ "$status" == 503 || "$status" == 409 ]] && return 1
+    text="$(py error "$WORK_DIR/out")"
+    die "HTTP $status${text:+: $text} (GET /api/v1/video/text)"
+}
+
+# $SECONDS ticks in whole seconds: more than N ticks since the start means at
+# least N real seconds, so a wait never ends early.
+wait_over() {
+    ((SECONDS - $1 > $2))
+}
+
+# The start page needs no token: true once the engine listens, whatever it answers.
+engine_answers() {
+    curl -s --connect-timeout 2 --max-time 5 -o /dev/null "$BASE_URL/" 2>/dev/null
+}
+
+cmd_type() {
+    local enter=1 cps=""
+    while (($#)); do
+        case "$1" in
+            --no-enter)
+                enter=0
+                shift
+                ;;
+            --cps)
+                need_args 2 $# "--cps needs a value"
+                is_float "$2" || usage_error "--cps must be a number"
+                cps="$2"
+                shift 2
+                ;;
+            --)
+                shift
+                break
+                ;;
+            *) break ;;
+        esac
+    done
+    need_args 1 $# "type needs text"
+    local text="$*"
+    ((enter)) && text+=$'\n'
+    ((${#text} <= TEXT_MAX)) || usage_error "text longer than $TEXT_MAX characters"
+    local body=(s:text "$text")
+    [[ -n "$cps" ]] && body+=(f:cps "$cps")
+    wait_input_idle
+    json_request POST /api/v1/input/type "${body[@]}"
+    wait_input_idle
+    say "typed"
+}
+
+send_keys() {
+    local specs=() arg spec
+    for arg in "$@"; do
+        spec="$(key_spec "$arg")"
+        specs+=("$spec")
+    done
+    wait_input_idle
+    py keys "$KEY_GAP_MS" "${specs[@]}" | request POST /api/v1/input/sequence application/json
+    wait_input_idle
+    say "sent ${#specs[@]} key(s)"
+}
+
+cmd_key() {
+    need_args 1 $# "key needs a key name"
+    local spec="$1" count=1 names=() i
+    [[ "$spec" != *:* ]] || usage_error "key takes --hold MS, not NAME:MS"
+    shift
+    while (($#)); do
+        case "$1" in
+            --hold)
+                need_args 2 $# "--hold needs a time in ms"
+                spec="$spec:$2"
+                shift 2
+                ;;
+            *)
+                count="$1"
+                shift
+                ;;
+        esac
+    done
+    if [[ ! "$count" =~ ^[0-9]+$ ]] || ((10#$count < 1 || 10#$count > 1000)); then
+        usage_error "key count must be 1 to 1000"
     fi
-    api_post /api/v1/capture/video/start \
-        -H "Content-Type: application/json" \
-        -d "{\"mode\": \"$mode\"}" >/dev/null
-    echo "recording started (mode=$mode)"
+    for ((i = 0; i < 10#$count; i++)); do
+        names+=("$spec")
+    done
+    send_keys "${names[@]}"
 }
 
-cmd_record_stop() {
-    api_post /api/v1/capture/video/stop >/dev/null
-    echo "recording stopped"
+cmd_keys() {
+    need_args 1 $# "keys needs at least one key name"
+    send_keys "$@"
 }
 
-cmd_record_status() {
-    api /api/v1/capture/video/status | python3 -c "
-import sys, json
-d = json.load(sys.stdin)
-for k, v in sorted(d.items()):
-    print(f'{k}: {v}')
-"
+cmd_mouse() {
+    need_args 1 $# "mouse needs move or click"
+    case "$1" in
+        move)
+            need_args 3 $# "mouse move needs dx and dy"
+            [[ "$2" =~ ^-?[0-9]+(\.[0-9]+)?$ && "$3" =~ ^-?[0-9]+(\.[0-9]+)?$ ]] ||
+                usage_error "mouse move needs numbers"
+            wait_input_idle
+            py move "$2" "$3" | request POST /api/v1/input/sequence application/json
+            ;;
+        click)
+            need_args 2 $# "mouse click needs a button"
+            case "$2" in
+                left | right | middle) ;;
+                *) usage_error "mouse button must be left, right or middle" ;;
+            esac
+            wait_input_idle
+            py click "$KEY_GAP_MS" "$2" | request POST /api/v1/input/sequence application/json
+            ;;
+        *) usage_error "mouse needs move or click" ;;
+    esac
+    wait_input_idle
+    say "mouse $1 sent"
+}
+
+cmd_mem() {
+    need_args 1 $# "mem needs read, write, search, alloc or free"
+    local sub="$1"
+    shift
+    case "$sub" in
+        read)
+            need_args 2 $# "mem read needs an address and a length"
+            need_number length "$2"
+            local path
+            path="$(addr_path "$1")"
+            request GET "$path/$2" "" application/json
+            show hexdump
+            ;;
+        write)
+            need_args 2 $# "mem write needs an address and bytes"
+            local path
+            path="$(addr_path "$1")"
+            shift
+            py hexbytes "$WORK_DIR/bytes" "$@" ||
+                usage_error "bytes must be pairs of hex digits"
+            request PUT "$path" application/octet-stream <"$WORK_DIR/bytes"
+            say "wrote $(wc -c <"$WORK_DIR/bytes" | tr -d ' ') byte(s)"
+            ;;
+        search)
+            need_args 3 $# "mem search needs a value, start and end"
+            local value="$1" start end width=1
+            need_number value "$value"
+            start="$(linear "$2")"
+            end="$(linear "$3")"
+            shift 3
+            if [[ "${1:-}" == --width ]]; then
+                need_args 2 $# "--width needs a value"
+                width_option "1 2 4" "$2"
+                width="$2"
+            elif (($#)); then
+                usage_error "unknown mem search option: $1"
+            fi
+            json_request POST /api/v1/memory/search i:value "$value" i:start "$start" i:end "$end" i:width "$width"
+            show matches
+            ;;
+        alloc)
+            need_args 1 $# "mem alloc needs a size"
+            need_number size "$1"
+            local body=(i:size "$1")
+            shift
+            while (($#)); do
+                need_args 2 $# "$1 needs a value"
+                case "$1" in
+                    --area) body+=(s:area "$2") ;;
+                    --strategy) body+=(s:strategy "$2") ;;
+                    *) usage_error "unknown mem alloc option: $1" ;;
+                esac
+                shift 2
+            done
+            json_request POST /api/v1/memory/allocate "${body[@]}"
+            show
+            ;;
+        free)
+            need_args 1 $# "mem free needs an address"
+            local addr
+            addr="$(linear "$1")"
+            json_request POST /api/v1/memory/free i:addr "$addr"
+            say "freed"
+            ;;
+        *) usage_error "unknown mem command: $sub" ;;
+    esac
+}
+
+cmd_freeze() {
+    need_args 1 $# "freeze needs add, list or clear"
+    case "$1" in
+        add)
+            need_args 3 $# "freeze add needs an address and a value"
+            local width=1
+            need_number value "$3"
+            if [[ "${4:-}" == --width ]]; then
+                need_args 5 $# "--width needs a value"
+                width_option "1 2 4" "$5"
+                width="$5"
+            fi
+            local addr
+            addr="$(linear "$2")"
+            json_request POST /api/v1/memory/freeze i:address "$addr" i:value "$3" i:width "$width"
+            say "frozen"
+            ;;
+        list)
+            request GET /api/v1/memory/freeze
+            show
+            ;;
+        clear)
+            if (($# >= 2)); then
+                local addr
+                addr="$(linear "$2")"
+                json_request DELETE /api/v1/memory/freeze i:address "$addr"
+            else
+                request DELETE /api/v1/memory/freeze
+            fi
+            say "cleared"
+            ;;
+        *) usage_error "unknown freeze command: $1" ;;
+    esac
+}
+
+cmd_regs() {
+    request GET /api/v1/cpu/state
+    show regs
+}
+
+cmd_reg() {
+    [[ "${1:-}" == set ]] || usage_error "usage: reg set <name> <value>"
+    need_args 3 $# "reg set needs a name and a value"
+    [[ "$2" =~ ^[A-Za-z]+$ ]] || usage_error "bad register name: $2"
+    need_number value "$3"
+    local name
+    name="$(printf '%s' "$2" | tr '[:upper:]' '[:lower:]')"
+    json_request PUT /api/v1/cpu/register s:register "$name" i:value "$3"
+    say "$name set"
+}
+
+cmd_cycles() {
+    if (($#)); then
+        [[ "$1" =~ ^[0-9]+$ ]] || usage_error "cycles must be a whole number"
+        json_request PUT /api/v1/cpu/cycles i:cycles "$1"
+    else
+        request GET /api/v1/cpu/cycles
+    fi
+    show
+}
+
+cmd_port() {
+    need_args 2 $# "port needs read or write and a port"
+    local sub="$1" port="$2" width=1
+    need_number port "$port"
+    shift 2
+    case "$sub" in
+        read)
+            if [[ "${1:-}" == --width ]]; then
+                need_args 2 $# "--width needs a value"
+                width_option "1 2" "$2"
+                width="$2"
+            fi
+            request GET "/api/v1/io/port?port=$port&width=$width"
+            show
+            ;;
+        write)
+            need_args 1 $# "port write needs a value"
+            local value="$1"
+            need_number value "$value"
+            if [[ "${2:-}" == --width ]]; then
+                need_args 3 $# "--width needs a value"
+                width_option "1 2" "$3"
+                width="$3"
+            fi
+            json_request PUT /api/v1/io/port i:port "$port" i:value "$value" i:width "$width"
+            say "written"
+            ;;
+        *) usage_error "port needs read or write" ;;
+    esac
+}
+
+cmd_dos_internals() {
+    request GET /api/v1/dos/internals
+    show
 }
 
 cmd_swap() {
-    local drive="$1"
-    local image="$2"
-    api_post /api/v1/drive/swap \
-        -H "Content-Type: application/json" \
-        -d "{\"drive\": \"$drive\", \"image\": \"$image\"}" | python3 -c "
-import sys, json
-d = json.load(sys.stdin)
-if d.get('error'):
-    print(f\"error: {d['error']}\", file=sys.stderr)
-    sys.exit(1)
-print(f\"swapped {d.get('drive', '?')}: to {d.get('image', '?')}\")
-"
+    need_args 2 $# "swap needs a drive and an image"
+    [[ "$1" =~ ^[A-Za-z]:?$ ]] || usage_error "bad drive letter: $1"
+    json_request POST /api/v1/drive/swap s:drive "${1:0:1}" s:image "$2"
+    say "swapped ${1:0:1}: to $2"
 }
 
 cmd_mount_lock() {
-    api_post /api/v1/mount/lock >/dev/null
-    echo "mount configuration locked"
+    if [[ "${1:-}" == status ]]; then
+        request GET /api/v1/mount/lock
+        show
+    elif (($#)); then
+        usage_error "usage: mount-lock [status]"
+    else
+        request POST /api/v1/mount/lock
+        say "mounts locked until restart"
+    fi
 }
 
-[[ $# -lt 1 ]] && usage
+start_script() {
+    request POST /api/v1/script/load text/plain
+    request POST /api/v1/script/start
+    say "script started"
+}
 
-case "$1" in
-    status)         cmd_status ;;
-    info)           cmd_info ;;
-    shutdown)       cmd_shutdown ;;
-    screen)         cmd_screen ;;
-    frame)          shift; cmd_frame "$@" ;;
-    type)           shift; cmd_type "$@" ;;
-    key)            shift; cmd_key "$1" ;;
-    keys)           shift; cmd_keys "$@" ;;
-    run)            shift; cmd_run "$@" ;;
-    file)           shift; cmd_file "$1" ;;
-    script-status)  cmd_script_status ;;
-    script-stop)    cmd_script_stop ;;
-    wait)           shift; cmd_wait "$@" ;;
-    record-start)   shift; cmd_record_start "${1:-raw}" ;;
-    record-stop)    cmd_record_stop ;;
-    record-status)  cmd_record_status ;;
-    swap)           shift; cmd_swap "$1" "$2" ;;
-    mount-lock)     cmd_mount_lock ;;
-    help|--help|-h) usage ;;
-    *)              echo "unknown command: $1" >&2; usage ;;
-esac
+cmd_run() {
+    need_args 1 $# "run needs Lua code"
+    printf '%s' "$*" | start_script
+}
+
+cmd_file() {
+    need_args 1 $# "file needs a path"
+    [[ -f "$1" ]] || die "file not found: $1"
+    start_script <"$1"
+}
+
+cmd_script_status() {
+    request GET /api/v1/script/status
+    show
+}
+
+cmd_script_stop() {
+    request POST /api/v1/script/stop
+    say "script stopped"
+}
+
+cmd_video() {
+    need_args 1 $# "video needs start, stop, status or compression"
+    case "$1" in
+        start)
+            local mode="${2:-raw}"
+            [[ "$mode" == raw || "$mode" == rendered ]] || usage_error "mode must be raw or rendered"
+            json_request POST /api/v1/capture/video/start s:mode "$mode"
+            say "video capture started ($mode)"
+            ;;
+        stop)
+            request POST /api/v1/capture/video/stop
+            show
+            ;;
+        status)
+            request GET /api/v1/capture/video/status
+            show
+            ;;
+        compression)
+            shift
+            if (($# == 0)); then
+                request GET /api/v1/capture/video/compression
+                show
+                return
+            fi
+            local body=()
+            while (($#)); do
+                need_args 2 $# "compression needs raw N and/or rendered N"
+                [[ "$1" == raw || "$1" == rendered ]] || usage_error "compression mode must be raw or rendered"
+                [[ "$2" =~ ^[0-9]$ ]] || usage_error "compression level must be 0 to 9"
+                body+=("i:$1" "$2")
+                shift 2
+            done
+            json_request PUT /api/v1/capture/video/compression "${body[@]}"
+            show
+            ;;
+        *) usage_error "unknown video command: $1" ;;
+    esac
+}
+
+cmd_audio() {
+    need_args 1 $# "audio needs start, stop or status"
+    case "$1" in
+        start)
+            if (($# >= 2)); then
+                json_request POST /api/v1/capture/audio/start s:path "$2"
+            else
+                request POST /api/v1/capture/audio/start
+            fi
+            show
+            ;;
+        stop)
+            request POST /api/v1/capture/audio/stop
+            show
+            ;;
+        status)
+            request GET /api/v1/capture/audio/status
+            show
+            ;;
+        *) usage_error "unknown audio command: $1" ;;
+    esac
+}
+
+cmd_input_record() {
+    need_args 1 $# "input-record needs start, pause, stop or status"
+    case "$1" in
+        start | pause | stop) request POST "/api/v1/input/record/$1" ;;
+        status) request GET /api/v1/input/record/status ;;
+        *) usage_error "unknown input-record command: $1" ;;
+    esac
+    show
+}
+
+cmd_mixer() {
+    if (($# == 0)); then
+        request GET /api/v1/mixer
+        show
+        return
+    fi
+    case "$1" in
+        volume)
+            need_args 3 $# "mixer volume needs left and right"
+            is_float "$2" || usage_error "volumes must be numbers"
+            is_float "$3" || usage_error "volumes must be numbers"
+            json_request PUT /api/v1/mixer/volume f:left "$2" f:right "$3"
+            ;;
+        mute | unmute) request POST "/api/v1/mixer/$1" ;;
+        channel)
+            need_args 4 $# "mixer channel needs a name, left and right"
+            [[ "$2" =~ ^[A-Za-z0-9_]+$ ]] || usage_error "bad channel name: $2"
+            is_float "$3" || usage_error "volumes must be numbers"
+            is_float "$4" || usage_error "volumes must be numbers"
+            json_request PUT "/api/v1/mixer/channel/$2" f:left "$3" f:right "$4"
+            ;;
+        *) usage_error "unknown mixer command: $1" ;;
+    esac
+    show
+}
+
+main() {
+    if [[ "${1:-}" == --json ]]; then
+        JSON_OUTPUT=1
+        shift
+    fi
+    (($#)) || usage_error "no command given"
+    local command="$1"
+    shift
+    case "$command" in
+        help | --help | -h)
+            usage
+            return 0
+            ;;
+    esac
+    local fn
+    case "$command" in
+        status | info | program | shutdown | screen | frame | wait | type | key | keys | \
+            mouse | mem | freeze | regs | reg | cycles | port | swap | run | file | \
+            video | audio | mixer)
+            fn="cmd_$command"
+            ;;
+        screen-info | dos-internals | mount-lock | script-status | script-stop | input-record)
+            fn="cmd_${command//-/_}"
+            ;;
+        record-start)
+            fn=cmd_video
+            set -- start "$@"
+            ;;
+        record-stop)
+            fn=cmd_video
+            set -- stop
+            ;;
+        record-status)
+            fn=cmd_video
+            set -- status
+            ;;
+        *) usage_error "unknown command: $command" ;;
+    esac
+    if [[ "$command" == wait ]]; then
+        TOKEN_WAIT=1
+    fi
+    setup
+    "$fn" "$@"
+}
+
+main "$@"

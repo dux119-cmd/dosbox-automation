@@ -11,7 +11,7 @@
 ;   iscc /DMyAppVersion="0.85.0" /DStagingDir="C:\BUILD\STAGING\dosbox-automation-0.85.0" dosbox-automation-installer.iss
 
 #define MyAppName "dosbox-automation"
-; Version can be overridden via ISCC /DMyAppVersion="x.y.z-daN"
+; Version can be overridden via ISCC /DMyAppVersion="x.y.z-preN"
 #ifndef MyAppVersion
   #define MyAppVersion "0.85.0"
 #endif
@@ -81,8 +81,14 @@ Source: "{#StagingDir}\Resources\*"; DestDir: "{app}\Resources"; Flags: ignoreve
 ; Documentation
 Source: "{#StagingDir}\README.md"; DestDir: "{app}"; Flags: ignoreversion
 Source: "{#StagingDir}\LICENSE"; DestDir: "{app}"; Flags: ignoreversion
+Source: "{#StagingDir}\NOTICE"; DestDir: "{app}"; Flags: ignoreversion
 Source: "{#StagingDir}\THIRD_PARTY_LICENSES.txt"; DestDir: "{app}"; Flags: ignoreversion
 Source: "{#StagingDir}\cheat-workbench.cmd"; DestDir: "{app}"; Flags: ignoreversion
+
+; Agent guide and command-line client (dosboxctl runs in Git Bash, MSYS2 or WSL)
+Source: "{#StagingDir}\AGENTS.md"; DestDir: "{app}"; Flags: ignoreversion
+Source: "{#StagingDir}\dosboxctl"; DestDir: "{app}"; Flags: ignoreversion
+Source: "{#StagingDir}\docs\agents\*"; DestDir: "{app}\docs\agents"; Flags: ignoreversion recursesubdirs createallsubdirs
 
 [Icons]
 ; Start Menu

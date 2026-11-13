@@ -133,7 +133,8 @@ bool LuaCoroutine::DrainPendingKeys()
 
 bool LuaCoroutine::CheckWaitForText()
 {
-	auto text = ReadScreenText();
+	// A screen the guest's page tables hide holds no text yet.
+	auto text = ReadScreenText().value_or(std::string{});
 
 	if (wait_text_ignorecase) {
 		std::transform(text.begin(), text.end(), text.begin(), [](unsigned char c) {
@@ -189,7 +190,7 @@ void LuaCoroutine::RegisterApi()
 
 	lua_pop(L, 1);
 
-	RegisterDosboxApi(L, this, debug_log);
+	RegisterDosboxApi(L, debug_log);
 }
 
 bool LuaCoroutine::Start(DebugLog* log)

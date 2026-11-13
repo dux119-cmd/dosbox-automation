@@ -5,6 +5,7 @@
 #include "private/freeze.h"
 #include "webserver.h"
 
+#include "hardware/guest_memory.h"
 #include "hardware/memory.h"
 
 #include "nlohmann/json.hpp"
@@ -78,7 +79,9 @@ void ApplyFreezes()
 		for (int i = 0; i < e.width; ++i) {
 			buf[i] = static_cast<uint8_t>((e.value >> (8 * i)) & 0xFF);
 		}
-		MEM_BlockWrite(e.address, buf, e.width);
+		// The write skips a page the guest has not mapped; the entry stays.
+		(void)GuestMemory::Write(e.address,
+		                         std::span<const uint8_t>(buf, e.width));
 	}
 }
 
@@ -100,7 +103,7 @@ void FreezeHandlers::Post(const Request& req, Response& res)
 
 	const uint64_t mem_total = static_cast<uint64_t>(MEM_TotalPages()) *
 	                           MemPageSize;
-	if (address + width > mem_total) {
+	if (uint64_t{address} + static_cast<uint64_t>(width) > mem_total) {
 		res.status = 400;
 		json err;
 		err["error"] = "address out of range";

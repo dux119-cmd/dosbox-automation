@@ -141,7 +141,7 @@ def main():
     client = DosboxClient(f"http://127.0.0.1:{port}", token=token)
     try:
         client.wait_ready(timeout=15)
-        client.wait_shell(timeout=15)
+        client.wait_autoexec_done()
     except TimeoutError:
         print("DOSBox did not reach shell.")
         proc.kill()

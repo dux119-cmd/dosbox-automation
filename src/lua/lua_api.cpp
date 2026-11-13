@@ -15,11 +15,13 @@
 #include "dos/drive_swap.h"
 #include "dos/programs/mount_policy.h"
 #include "hardware/input/keyboard.h"
+#include "hardware/guest_memory.h"
 #include "hardware/input/mouse.h"
 #include "hardware/memory.h"
 #include "augra/log.h"
 #include "ints/int10.h"
 #include "misc/logging.h"
+#include "utils/string_utils.h"
 
 extern "C" {
 #include <lauxlib.h>
@@ -27,8 +29,13 @@ extern "C" {
 }
 
 #include <algorithm>
+#include <array>
+#include <cassert>
 #include <cctype>
+#include <cstdint>
 #include <filesystem>
+#include <optional>
+#include <span>
 #include <string>
 #include <unordered_map>
 #include <utility>
@@ -293,17 +300,53 @@ static uint32_t ResolveAddress(lua_State* L, int seg_idx, int off_idx)
 	return PhysicalMake(seg, off);
 }
 
-static void ValidateMemRange(lua_State* L, uint32_t addr, size_t len)
+// lua_pushfstring knows no %x, and luaL_error leaves by longjmp past C++
+// destructors: the hex text lives on the Lua stack, not in a local.
+static const char* PushHex(lua_State* L, const PhysPt address)
 {
-	const uint64_t mem_total = static_cast<uint64_t>(MEM_TotalPages()) *
-	                           MemPageSize;
+	const auto hex = format_str("0x%x", address);
+	return lua_pushlstring(L, hex.data(), hex.size());
+}
+
+static int RaiseNotMapped(lua_State* L, const PhysPt address)
+{
+	return luaL_error(L,
+	                  "guest page tables do not map address %s",
+	                  PushHex(L, address));
+}
+
+static void CheckMemBound(lua_State* L, const uint32_t addr, const size_t len)
+{
 	const uint64_t end = static_cast<uint64_t>(addr) + len;
-	if (end > mem_total) {
+	if (end > GuestMemory::AddressLimit()) {
 		luaL_error(L,
-		           "memory access out of range: 0x%x + %d",
-		           addr,
+		           "memory access out of range: %s + %d",
+		           PushHex(L, addr),
 		           static_cast<int>(len));
 	}
+}
+
+// Reads into a Lua-owned buffer: an error leaves by longjmp, and nothing of
+// ours is left to destroy.
+static void PushGuestBytes(lua_State* L, const uint32_t addr, const size_t len)
+{
+	luaL_Buffer buffer = {};
+	auto* bytes = reinterpret_cast<uint8_t*>(luaL_buffinitsize(L, &buffer, len));
+	if (const auto read = GuestMemory::Read(addr, {bytes, len}); !read) {
+		RaiseNotMapped(L, read.error());
+	}
+	luaL_pushresultsize(&buffer, len);
+}
+
+static uint32_t ReadGuestLittleEndian(lua_State* L, const uint32_t addr,
+                                      const size_t len)
+{
+	std::array<uint8_t, 2> bytes = {};
+	assert(len <= bytes.size());
+	if (const auto read = GuestMemory::Read(addr, {bytes.data(), len}); !read) {
+		RaiseNotMapped(L, read.error());
+	}
+	return bytes[0] | (len > 1 ? static_cast<uint32_t>(bytes[1]) << 8 : 0u);
 }
 
 // dosbox.mem_read(seg, off, len) -> string
@@ -316,12 +359,8 @@ static int LuaMemRead(lua_State* L)
 		return luaL_error(L, "mem_read: length must be 1..1048576");
 	}
 
-	ValidateMemRange(L, addr, len);
-
-	std::string buf(len, '\0');
-	MEM_BlockRead(addr, buf.data(), len);
-
-	lua_pushlstring(L, buf.data(), buf.size());
+	CheckMemBound(L, addr, len);
+	PushGuestBytes(L, addr, len);
 
 	auto* dl = GetDebugLog(L);
 	if (dl && dl->IsOpen()) {
@@ -346,9 +385,11 @@ static int LuaMemWrite(lua_State* L)
 		return luaL_error(L, "mem_write: data must be 1..1048576 bytes");
 	}
 
-	ValidateMemRange(L, addr, len);
-
-	MEM_BlockWrite(addr, data, len);
+	CheckMemBound(L, addr, len);
+	const auto bytes = std::span(reinterpret_cast<const uint8_t*>(data), len);
+	if (const auto written = GuestMemory::Write(addr, bytes); !written) {
+		return RaiseNotMapped(L, written.error());
+	}
 
 	auto* dl = GetDebugLog(L);
 	if (dl && dl->IsOpen()) {
@@ -366,8 +407,8 @@ static int LuaMemWrite(lua_State* L)
 static int LuaMemReadByte(lua_State* L)
 {
 	const auto addr = ResolveAddress(L, 1, 2);
-	ValidateMemRange(L, addr, 1);
-	lua_pushinteger(L, mem_readb(addr));
+	CheckMemBound(L, addr, 1);
+	lua_pushinteger(L, ReadGuestLittleEndian(L, addr, 1));
 	return 1;
 }
 
@@ -375,8 +416,8 @@ static int LuaMemReadByte(lua_State* L)
 static int LuaMemReadWord(lua_State* L)
 {
 	const auto addr = ResolveAddress(L, 1, 2);
-	ValidateMemRange(L, addr, 2);
-	lua_pushinteger(L, mem_readw(addr));
+	CheckMemBound(L, addr, 2);
+	lua_pushinteger(L, ReadGuestLittleEndian(L, addr, 2));
 	return 1;
 }
 
@@ -389,36 +430,48 @@ static bool IsTextMode()
 	return INT10_IsTextMode(*CurMode);
 }
 
-std::string ReadScreenText()
+std::expected<std::string, PhysPt> ReadScreenText()
 {
 	if (!IsTextMode()) {
 		return {};
 	}
 
+	constexpr PhysPt BiosDataArea  = BIOSMEM_SEG << 4;
+	std::array<uint8_t, 0x100> bda = {};
+	if (const auto read = GuestMemory::Read(BiosDataArea, bda); !read) {
+		return std::unexpected(read.error());
+	}
+	const auto bda_word = [&](const size_t offset) {
+		return bda[offset] | (bda[offset + 1] << 8);
+	};
+
 	// Live BIOS data area, not mode-table defaults: the guest can flip
 	// display page or change column count at runtime.
 	// Mirrors ReadCharAttr M_TEXT case (src/ints/int10_char.cpp).
-	const int cols = real_readw(BIOSMEM_SEG, BIOSMEM_NB_COLS);
+	const int cols = bda_word(BIOSMEM_NB_COLS);
 	const int rows = CurMode->theight;
 	if (cols <= 0 || rows <= 0) {
 		return {};
 	}
 
-	const uint8_t page     = real_readb(BIOSMEM_SEG, BIOSMEM_CURRENT_PAGE);
-	const auto page_size   = real_readw(BIOSMEM_SEG, BIOSMEM_PAGE_SIZE);
+	const uint8_t page = bda[BIOSMEM_CURRENT_PAGE];
+	const auto page_size = static_cast<uint32_t>(bda_word(BIOSMEM_PAGE_SIZE));
 	const PhysPt page_base = CurMode->pstart +
 	                         static_cast<uint32_t>(page) * page_size;
+
+	const auto cells = static_cast<size_t>(rows) * static_cast<size_t>(cols) * 2;
+	std::vector<uint8_t> buffer(cells);
+	if (const auto read = GuestMemory::Read(page_base, buffer); !read) {
+		return std::unexpected(read.error());
+	}
 
 	std::string result;
 	result.reserve(static_cast<size_t>((cols + 1) * rows));
 
 	for (int row = 0; row < rows; ++row) {
 		for (int col = 0; col < cols; ++col) {
-			const PhysPt addr = page_base +
-			                    static_cast<uint32_t>(
-			                            (row * cols + col) * 2);
-			const uint8_t ch = mem_readb(addr);
-			result += static_cast<char>(ch);
+			const auto cell = static_cast<size_t>(row * cols + col) * 2;
+			result += static_cast<char>(buffer[cell]);
 		}
 		result += '\n';
 	}
@@ -429,17 +482,23 @@ std::string ReadScreenText()
 // dosbox.screen_text() -> string
 static int LuaScreenText(lua_State* L)
 {
-	const auto text = ReadScreenText();
-	lua_pushlstring(L, text.data(), text.size());
+	PhysPt not_mapped_at = 0;
+	{
+		const auto text = ReadScreenText();
+		if (text) {
+			lua_pushlstring(L, text->data(), text->size());
 
-	auto* dl = GetDebugLog(L);
-	if (dl && dl->IsOpen()) {
-		dl->Trace(CurrentFrame(L),
-		          "dosbox.screen_text() -> %d bytes",
-		          static_cast<int>(text.size()));
+			auto* dl = GetDebugLog(L);
+			if (dl && dl->IsOpen()) {
+				dl->Trace(CurrentFrame(L),
+				          "dosbox.screen_text() -> %d bytes",
+				          static_cast<int>(text->size()));
+			}
+			return 1;
+		}
+		not_mapped_at = text.error();
 	}
-
-	return 1;
+	return RaiseNotMapped(L, not_mapped_at);
 }
 
 bool MatchSubstring(const std::string& haystack, const std::string& needle,
@@ -479,8 +538,19 @@ static int LuaScreenMatch(lua_State* L)
 		lua_pop(L, 1);
 	}
 
-	const auto text  = ReadScreenText();
-	const bool match = MatchSubstring(text, pattern, ignorecase);
+	bool match                          = false;
+	std::optional<PhysPt> not_mapped_at = {};
+	{
+		const auto text = ReadScreenText();
+		if (!text) {
+			not_mapped_at = text.error();
+		} else {
+			match = MatchSubstring(*text, pattern, ignorecase);
+		}
+	}
+	if (not_mapped_at) {
+		return RaiseNotMapped(L, *not_mapped_at);
+	}
 	lua_pushboolean(L, match);
 
 	auto* dl = GetDebugLog(L);
@@ -560,7 +630,7 @@ static int LuaWaitForText(lua_State* L)
 	// unwinds but can double-free it. Keeping the yielding frame free of
 	// live destructibles is correct on both (aug-zj8l).
 	{
-		const auto text = ReadScreenText();
+		const auto text = ReadScreenText().value_or(std::string{});
 		if (MatchSubstring(text, pattern, ignorecase)) {
 			OSD_ClearCommand();
 			lua_pushboolean(L, true);
@@ -922,7 +992,7 @@ static int LuaMixerChannelVolume(lua_State* L)
 // dosbox.mixer_mute()
 static int LuaMixerMute(lua_State* L)
 {
-	MIXER_Mute();
+	MIXER_SetManualMute(true);
 
 	auto* dl = GetDebugLog(L);
 	if (dl && dl->IsOpen()) {
@@ -935,7 +1005,7 @@ static int LuaMixerMute(lua_State* L)
 // dosbox.mixer_unmute()
 static int LuaMixerUnmute(lua_State* L)
 {
-	MIXER_Unmute();
+	MIXER_SetManualMute(false);
 
 	auto* dl = GetDebugLog(L);
 	if (dl && dl->IsOpen()) {
@@ -963,8 +1033,10 @@ static int LuaCaptureStart(lua_State* L)
 		return luaL_error(L, "capture_start: mode must be 'raw' or 'rendered'");
 	}
 
+	if (!CAPTURE_StartVideoCapture(mode)) {
+		return luaL_error(L, "capture_start: already capturing video");
+	}
 	OSD_ShowCommand("capture_start", CurrentFrame(L));
-	CAPTURE_StartVideoCapture(mode);
 
 	auto* dl = GetDebugLog(L);
 	if (dl && dl->IsOpen()) {
@@ -986,36 +1058,47 @@ static int LuaCaptureStop(lua_State* L)
 	return 0;
 }
 
-// dosbox.audio_capture_start([path])
-static int LuaAudioCaptureStart(lua_State* L)
+// This function keeps every C++ object of the start: Lua is built as C, and
+// the caller's luaL_error longjmps past destructors.
+static AudioCaptureStart StartAudioCapture(lua_State* L, const char* requested)
 {
-	std::string output_path;
-	if (lua_gettop(L) >= 1 && !lua_isnil(L, 1)) {
-		output_path = luaL_checkstring(L, 1);
-
-		if (!output_path.empty()) {
-			std::error_code ec;
-			const auto parent = std::filesystem::canonical(
-				std::filesystem::path(output_path).parent_path(), ec);
-			if (ec || MountPolicy::IsUnderSystemPath(parent)) {
-				return luaL_error(L,
-				                  "audio_capture_start: output path rejected by system path policy");
-			}
+	auto file = std::string();
+	if (requested && *requested) {
+		const auto outcome = CAPTURE_StartAudioCaptureAt(requested, file);
+		if (outcome != AudioCaptureStart::Started) {
+			return outcome;
 		}
+	} else if (!CAPTURE_StartAudioCapture()) {
+		return AudioCaptureStart::AlreadyCapturing;
 	}
-
 	OSD_ShowCommand("audio_capture_start", CurrentFrame(L));
-	CAPTURE_StartAudioCapture(output_path);
 
 	auto* dl = GetDebugLog(L);
 	if (dl && dl->IsOpen()) {
-		if (output_path.empty()) {
+		if (file.empty()) {
 			dl->Trace(CurrentFrame(L), "dosbox.audio_capture_start()");
 		} else {
 			dl->Trace(CurrentFrame(L),
 			          "dosbox.audio_capture_start(\"%s\")",
-			          output_path.c_str());
+			          file.c_str());
 		}
+	}
+	return AudioCaptureStart::Started;
+}
+
+// dosbox.audio_capture_start([path])
+static int LuaAudioCaptureStart(lua_State* L)
+{
+	const char* requested = nullptr;
+	if (lua_gettop(L) >= 1 && !lua_isnil(L, 1)) {
+		requested = luaL_checkstring(L, 1);
+	}
+	switch (StartAudioCapture(L, requested)) {
+	case AudioCaptureStart::PathRefused:
+		return luaL_error(L, "audio_capture_start: path must name a new file in the capture folder");
+	case AudioCaptureStart::AlreadyCapturing:
+		return luaL_error(L, "audio_capture_start: already capturing audio");
+	case AudioCaptureStart::Started: break;
 	}
 	return 0;
 }
@@ -1037,7 +1120,7 @@ static int LuaAudioCaptureStop(lua_State* L)
 // Registration
 // ================================================================
 
-void RegisterDosboxApi(lua_State* L, LuaCoroutine* coroutine, DebugLog* debug_log)
+void RegisterDosboxApi(lua_State* L, DebugLog* debug_log)
 {
 	// Store pointers for the C callbacks.
 	lua_pushlightuserdata(L, debug_log);

@@ -1,5 +1,6 @@
 // SPDX-FileCopyrightText:  2020-2026 The DOSBox Staging Team
 // SPDX-License-Identifier: GPL-2.0-or-later
+// Copyright (C) 2026 dosbox-automation contributors
 
 #ifndef DOSBOX_STRING_UTILS_H
 #define DOSBOX_STRING_UTILS_H
@@ -253,6 +254,12 @@ bool natural_compare(const std::string& a, const std::string& b);
 
 char* strip_word(char*& line);
 std::string strip_word(std::string& line);
+
+// Control bytes as \xNN, for text from a file that reaches a log or console.
+std::string escape_control_bytes(std::string_view text);
+
+// One argument of a Windows command line, as CommandLineToArgvW reads it back.
+std::string quote_windows_argument(std::string_view arg);
 
 std::string replace(const std::string& str, char old_char, char new_char) noexcept;
 void trim(std::string& str, const std::string_view trim_chars = " \r\t\f\n");

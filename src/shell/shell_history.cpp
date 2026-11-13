@@ -1,5 +1,6 @@
 // SPDX-FileCopyrightText:  2024-2025 The DOSBox Staging Team
 // SPDX-License-Identifier: GPL-2.0-or-later
+// Copyright (C) 2026 dosbox-automation contributors
 
 #include "shell/shell.h"
 
@@ -7,6 +8,7 @@
 
 #include "utils/checks.h"
 #include "config/config.h"
+#include "dos/archive/archive_toml.h"
 #include "dosbox.h"
 #include "utils/fs_utils.h"
 #include "utils/string_utils.h"
@@ -35,6 +37,7 @@ void ShellHistory::Append(std::string command, uint16_t code_page)
 	if (!command_is_exit(command) && !command.empty() &&
 	    (commands.empty() || commands.back() != utf8_command)) {
 		commands.emplace_back(std::move(utf8_command));
+		changed = true;
 	}
 }
 
@@ -96,10 +99,9 @@ ShellHistory::~ShellHistory()
 	if (path.empty()) {
 		return;
 	}
-	auto history_file = std::ofstream(path);
-	if (!history_file) {
-		LOG_WARNING("SHELL: Unable to update history file: '%s'",
-		            path.string().c_str());
+	// Every engine start makes a throwaway shell for COMMAND.COM's help;
+	// writing back an unchanged history from it raced other engines.
+	if (!changed) {
 		return;
 	}
 
@@ -107,8 +109,22 @@ ShellHistory::~ShellHistory()
 		commands.erase(commands.begin(), commands.end() - HistoryMaxNumLines);
 	}
 
+	std::string text = {};
 	for (const auto& command : commands) {
-		history_file << command << '\n';
+		text += command;
+		text += '\n';
+	}
+
+	// A new file renamed into place, so another engine reading the history
+	// never sees it empty; a symlinked history file stays a link.
+	std::error_code ec = {};
+	auto target        = std_fs::weakly_canonical(path, ec);
+	if (ec) {
+		target = path;
+	}
+	if (!ArchiveToml::WriteTextAtomically(target, text, nullptr)) {
+		LOG_WARNING("SHELL: Unable to update history file: '%s'",
+		            path.string().c_str());
 	}
 }
 

@@ -9,9 +9,11 @@
 
 #include <cstdint>
 #include <functional>
+#include <optional>
 #include <string>
 #include <vector>
 
+#include "hardware/memory.h"
 #include "http/http.h"
 
 namespace Webserver {
@@ -41,9 +43,20 @@ class DosInternalsCommand : public Command {
 	uint16_t first_shell        = {};
 	std::vector<McbBlock> memory_map = {};
 
+	std::optional<PhysPt> not_mapped_at = {};
+
 public:
 	void Execute() override;
 	static void Get(const httplib::Request& req, httplib::Response& res);
+
+	const std::vector<McbBlock>& MemoryMap() const
+	{
+		return memory_map;
+	}
+	std::optional<PhysPt> NotMappedAt() const
+	{
+		return not_mapped_at;
+	}
 };
 
 enum class MemoryArea { Conv, Uma, Xms };
@@ -52,7 +65,7 @@ enum class AllocStrategy { FirstFit, BestFit, LastFit };
 
 class AllocMemoryCommand : public Command {
 public:
-	AllocMemoryCommand(const uint16_t bytes, const MemoryArea area,
+	AllocMemoryCommand(const uint32_t bytes, const MemoryArea area,
 	                   const AllocStrategy strategy)
 	        : area(area),
 	          strategy(strategy),
@@ -63,11 +76,18 @@ public:
 	void Execute() override;
 	static void Post(const httplib::Request& req, httplib::Response& res);
 
+	std::optional<PhysPt> NotMappedAt() const
+	{
+		return not_mapped_at;
+	}
+
 private:
+	std::optional<PhysPt> not_mapped_at = {};
+
 	MemoryArea area        = {};
 	AllocStrategy strategy = AllocStrategy::BestFit;
 	uint32_t addr          = 0;
-	uint16_t bytes         = 0;
+	uint32_t bytes         = 0;
 
 	void AllocDos();
 	void AllocXms();
@@ -80,7 +100,14 @@ public:
 	void Execute() override;
 	static void Post(const httplib::Request& req, httplib::Response& res);
 
+	std::optional<PhysPt> NotMappedAt() const
+	{
+		return not_mapped_at;
+	}
+
 private:
+	std::optional<PhysPt> not_mapped_at = {};
+
 	uint32_t addr = 0;
 	bool success  = false;
 };

@@ -186,6 +186,45 @@ TEST_F(ArchiveDriveTest, DotEntriesPatternsAndAttributeMasks)
 	EXPECT_STREQ(drive->GetLabel(), "DOOM");
 }
 
+// A package keeps its conf in _DOSBOX at the root, out of DIR's way unless
+// hidden entries are asked for; one deeper is an ordinary folder.
+TEST_F(ArchiveDriveTest, TheDosboxFolderAtTheRootIsHidden)
+{
+	auto drive = Drive(Built("pkg.zip",
+	                         Kind::ZipStored,
+	                         {{"_DOSBOX/", "", true},
+	                          {"_DOSBOX/DOSBOX.CNF", "[cpu]\n"},
+	                          {"GAME.EXE", "MZ"},
+	                          {"SUB/", "", true},
+	                          {"SUB/_DOSBOX/", "", true}}));
+	ASSERT_TRUE(drive);
+	FatAttributeFlags dirs                  = {};
+	dirs.directory                          = true;
+	std::vector<ArchiveDrive::Listing> list = {};
+	ASSERT_TRUE(drive->List("", "????????.???", dirs, false, list));
+	EXPECT_EQ(Names(list), (std::vector<std::string>{"GAME.EXE", "SUB"}));
+	list.clear();
+	auto hidden_too   = dirs;
+	hidden_too.hidden = true;
+	ASSERT_TRUE(drive->List("", "????????.???", hidden_too, false, list));
+	ASSERT_EQ(Names(list), (std::vector<std::string>{"_DOSBOX", "GAME.EXE", "SUB"}));
+	EXPECT_TRUE(list[0].attr.hidden);
+	EXPECT_FALSE(list[1].attr.hidden);
+	list.clear();
+	ASSERT_TRUE(drive->List("SUB", "????????.???", dirs, false, list));
+	EXPECT_EQ(Names(list), (std::vector<std::string>{".", "..", "_DOSBOX"}));
+
+	FatAttributeFlags attr = {};
+	ASSERT_TRUE(drive->GetFileAttr("_DOSBOX", &attr));
+	EXPECT_TRUE(attr.hidden);
+	EXPECT_TRUE(attr.directory);
+	ASSERT_TRUE(drive->GetFileAttr("SUB\\_DOSBOX", &attr));
+	EXPECT_FALSE(attr.hidden);
+	auto file = drive->FileOpen("_DOSBOX\\DOSBOX.CNF", OPEN_READ);
+	ASSERT_TRUE(file);
+	EXPECT_EQ(ReadAll(*file), "[cpu]\n");
+}
+
 TEST_F(ArchiveDriveTest, OpensReadsAndSeeksAMemberInMemory)
 {
 	auto drive = Drive(Built("doom.zip", Kind::ZipDeflate, Game()));
@@ -425,7 +464,7 @@ TEST_F(ArchiveDriveTest, AllocationInfoReportsTheDeclaredTotalAsUsedAndNothingFr
 TEST_F(ArchiveDriveTest, LabelsAreFoldedToFatForm)
 {
 	EXPECT_EQ(ArchiveDrive::FoldLabel("doom"), "DOOM");
-	EXPECT_EQ(ArchiveDrive::FoldLabel("Quest for Glory IV"), "QUEST_FOR_G");
+	EXPECT_EQ(ArchiveDrive::FoldLabel("Quest for Glory IV"), "QUEST_FO.R_G");
 	EXPECT_EQ(ArchiveDrive::FoldLabel("x.y-z_1"), "X_Y-Z_1");
 	EXPECT_EQ(ArchiveDrive::FoldLabel(""), "ARCHIVE");
 	EXPECT_EQ(ArchiveDrive::FoldLabel("..."), "___");

@@ -14086,6 +14086,39 @@ msgstr ""
 
 #: src/dos/programs/mount.cpp
 #, c-format, no-wrap
+msgctxt "PROGRAM_MOUNT_POLICY_REFUSED_FILE"
+msgid ""
+"%s\n"
+"was refused by the mount policy: %s.\n"
+"Put a dosbox-automation.conf next to the game and start with -conf,\n"
+"or add its folder to mount_allowed_image_roots in the primary config.\n"
+"The security page of the manual explains the policy.\n"
+msgstr ""
+"%s\n"
+"wurde von der Mount-Richtlinie abgelehnt: %s.\n"
+"Lege eine dosbox-automation.conf neben das Spiel und starte mit -conf,\n"
+"oder trage den Ordner der Datei in mount_allowed_image_roots\n"
+"der Hauptkonfiguration ein.\n"
+"Die Sicherheitsseite des Handbuchs erklärt die Richtlinie.\n"
+
+#: src/dos/programs/mount.cpp
+#, c-format, no-wrap
+msgctxt "PROGRAM_MOUNT_POLICY_SYSTEM"
+msgid ""
+"%s\n"
+"was refused by the mount policy: %s.\n"
+"System folders and device names are never mounted, whatever the\n"
+"configuration says. Copy what the game needs into a folder of its own.\n"
+"The security page of the manual explains the policy.\n"
+msgstr ""
+"%s\n"
+"wurde von der Mount-Richtlinie abgelehnt: %s.\n"
+"Systemordner und Gerätenamen werden nie eingebunden, egal was die\n"
+"Konfiguration sagt. Kopiere, was das Spiel braucht, in einen eigenen Ordner.\n"
+"Die Sicherheitsseite des Handbuchs erklärt die Richtlinie.\n"
+
+#: src/dos/programs/mount.cpp
+#, c-format, no-wrap
 msgctxt "PROGRAM_MOUNT_POLICY_SYMLINK"
 msgid ""
 "%s\n"

@@ -1,5 +1,6 @@
 // SPDX-FileCopyrightText:  2021-2026 The DOSBox Staging Team
 // SPDX-License-Identifier: GPL-2.0-or-later
+// Copyright (C) 2026 dosbox-automation contributors
 
 #include "ethernet_slirp.h"
 
@@ -217,7 +218,9 @@ bool SlirpEthernetConnection::Initialize(Section *dosbox_config)
 
 	// If true, prevent the guest access from accessing the host's loopback
 	// interfaces.
-	config.disable_host_loopback = false;
+	const auto settings = static_cast<SectionProp*>(dosbox_config);
+	assert(settings);
+	config.disable_host_loopback = !settings->GetBool("host_loopback");
 
 	// The maximum transmission and receive unit sizes.
 	constexpr auto ethernet_frame_size = 14 + 1500; // header + payload

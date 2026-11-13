@@ -1,5 +1,6 @@
 // SPDX-FileCopyrightText:  2002-2025 The DOSBox Team
 // SPDX-License-Identifier: GPL-2.0-or-later
+// Copyright (C) 2026 dosbox-automation contributors
 
 #ifndef DOSBOX_PAGING_H
 #define DOSBOX_PAGING_H
@@ -74,6 +75,10 @@ void PAGING_Init();
 // Some other functions
 void PAGING_Enable(bool enabled);
 bool PAGING_Enabled();
+
+// Whether the CPU would reach the linear address without a page fault, at
+// its current privilege; changes nothing, not CR2 or the TLB either.
+bool PAGING_HostCanAccess(PhysPt lin_addr, bool writing);
 
 Bitu PAGING_GetDirBase();
 void PAGING_SetDirBase(Bitu cr3);

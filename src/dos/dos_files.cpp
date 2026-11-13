@@ -5,12 +5,15 @@
 
 #include "dos.h"
 
+#include <algorithm>
 #include <array>
 #include <cctype>
 #include <climits>
 #include <cstdlib>
 #include <cstring>
 #include <ctime>
+#include <string>
+#include <string_view>
 
 #include "dosbox.h"
 #include "dos_windows.h"
@@ -634,6 +637,17 @@ static bool find_first(const char* search, FatAttributeFlags attr, bool fcb_find
 		safe_strcpy(dir, fullsearch);
 	}
 
+	// An FCB search compares all 11 name bytes, blanks inside included
+	// (MS-DOS 4.0 SEARCH.ASM); DOS_MakeName above drops the blanks.
+	if (fcb_findfirst) {
+		const std::string_view fcb_name = search;
+		const auto separator            = fcb_name.find_last_of("\\/:");
+		const auto name = (separator == std::string_view::npos)
+		                        ? fcb_name
+		                        : fcb_name.substr(separator + 1);
+		safe_strcpy(pattern, std::string(name).c_str());
+	}
+
 	dta.SetupSearch(drive, attr, pattern);
 
 	if(device) {
@@ -820,6 +834,84 @@ bool DOS_FlushFile(uint16_t entry) {
 	return true;
 }
 
+namespace {
+
+// What 3Ch/5Bh hand back for a volume label: it names the volume and
+// holds no data.
+class VolumeLabelFile final : public DOS_File {
+public:
+	bool Read(uint8_t*, uint16_t* size) override
+	{
+		*size = 0;
+		return true;
+	}
+	bool Write(uint8_t*, uint16_t* size) override
+	{
+		*size = 0;
+		return true;
+	}
+	bool Seek(uint32_t* pos, uint32_t) override
+	{
+		*pos = 0;
+		return true;
+	}
+	void Close() override {}
+	uint16_t GetInformation() override
+	{
+		return 0;
+	}
+	bool IsOnReadOnlyMedium() const override
+	{
+		return false;
+	}
+};
+
+// An FCB name is 11 bytes, space padded, '?' matching any byte; the
+// label is NAME.EXT as the drives keep it.
+bool FcbPatternMatchesLabel(const std::string_view pattern11,
+                            const std::string_view label)
+{
+	if (label.empty() || pattern11.size() != 11) {
+		return false;
+	}
+	const auto dot  = label.find('.');
+	const auto base = label.substr(0, dot);
+	const auto ext  = dot == std::string_view::npos ? std::string_view()
+	                                                : label.substr(dot + 1);
+	std::string padded(11, ' ');
+	padded.replace(0, std::min<size_t>(base.size(), 8), base.substr(0, 8));
+	padded.replace(8, std::min<size_t>(ext.size(), 3), ext.substr(0, 3));
+	for (size_t i = 0; i < 11; ++i) {
+		const auto p = static_cast<unsigned char>(pattern11[i]);
+		const auto c = static_cast<unsigned char>(padded[i]);
+		if (p != '?' && toupper(p) != toupper(c)) {
+			return false;
+		}
+	}
+	return true;
+}
+
+} // namespace
+
+// A label as DOS name parsing cuts a name: up to 8 and 3 characters, each
+// part without its trailing blanks; a longer one would overrun the 13-byte
+// name of a DTA on the next volume search.
+static std::string label_from_name(const std::string_view tail)
+{
+	auto trimmed = [](std::string_view part, const size_t max_chars) {
+		part = part.substr(0, std::min(part.size(), max_chars));
+		while (!part.empty() && part.back() == ' ') {
+			part.remove_suffix(1);
+		}
+		return std::string(part);
+	};
+	const auto dot  = tail.find('.');
+	const auto base = trimmed(tail.substr(0, dot), 8);
+	const auto ext  = dot == std::string_view::npos ? std::string()
+	                                                : trimmed(tail.substr(dot + 1), 3);
+	return ext.empty() ? base : base + "." + ext;
+}
+
 bool DOS_CreateFile(const char* name, FatAttributeFlags attributes,
                     uint16_t* entry, bool fcb)
 {
@@ -835,6 +927,17 @@ bool DOS_CreateFile(const char* name, FatAttributeFlags attributes,
 	uint8_t drive;
 	if (!DOS_MakeName(name, fullname, &drive))
 		return false;
+	// MS-DOS 4.0 MACRO2.ASM Canonicalize and FILE.ASM AccessFile: metas in a
+	// directory are a bad path, in the name a missing file
+	const std::string_view resolved_path = fullname;
+	if (const auto meta = resolved_path.find_first_of("*?");
+	    meta != std::string_view::npos) {
+		const auto last_sep = resolved_path.find_last_of('\\');
+		const bool in_directory = last_sep != std::string_view::npos &&
+		                          meta < last_sep;
+		DOS_SetError(in_directory ? DOSERR_PATH_NOT_FOUND : DOSERR_FILE_NOT_FOUND);
+		return false;
+	}
 
 	/* Check for a free file handle */
 	uint8_t handle = DOS_FILES;
@@ -865,6 +968,29 @@ bool DOS_CreateFile(const char* name, FatAttributeFlags attributes,
 	if (attributes.directory) {
 		DOS_SetError(DOSERR_ACCESS_DENIED);
 		return false;
+	}
+	// MS-DOS 4.0 LABEL.ASM and FORMAT /V create the label as a root file
+	// with the volume attribute alone (5Bh, CX=08h).
+	if (attributes == FatAttributeFlags::Volume) {
+		// The name comes from the caller's path: file name parsing strips
+		// the blanks a label may hold. An FCB pads both parts with blanks.
+		std::string_view tail = name;
+		const auto name_start = tail.find_last_of("\\/:");
+		if (name_start != std::string_view::npos) {
+			tail.remove_prefix(name_start + 1);
+		}
+		const auto label                = label_from_name(tail);
+		const std::string_view resolved = fullname;
+		if (label.empty() || resolved.find('\\') != std::string_view::npos ||
+		    !Drives.at(drive)->SetVolumeLabel(label)) {
+			DOS_SetError(DOSERR_ACCESS_DENIED);
+			return false;
+		}
+		Files[handle] = std::make_unique<VolumeLabelFile>();
+		Files[handle]->SetDrive(drive);
+		Files[handle]->AddRef();
+		if (!fcb) psp.SetFileHandle(*entry, handle);
+		return true;
 	}
 	Files[handle] = Drives.at(drive)->FileCreate(fullname, attributes);
 	if (Files[handle]) {
@@ -1759,6 +1885,24 @@ bool DOS_FCBDeleteFile(uint16_t seg, uint16_t offset)
 	 * stored. This can not be the tempdta as that one is used by
 	 * fcbfindfirst
 	 */
+
+	DOS_FCB request(seg, offset);
+	FatAttributeFlags request_attr = {};
+	request.GetAttr(request_attr);
+	// MS-DOS 4.0 LABEL.ASM: attribute 08h alone deletes the label, never files.
+	if (request.Extended() && request_attr == FatAttributeFlags::Volume) {
+		const auto drive = request.GetDrive();
+		if (drive >= DOS_DRIVES || !Drives[drive] || Drives[drive]->IsReadOnly()) {
+			return false;
+		}
+		char fcb_name[DOS_FCBNAME] = {};
+		request.GetName(fcb_name);
+		// GetName always fills "D:" 8 "." 3; the bytes may hold NULs.
+		const std::string_view name(fcb_name, 14);
+		const auto pattern = std::string(name.substr(2, 8)) + std::string(name.substr(11, 3));
+		return FcbPatternMatchesLabel(pattern, Drives[drive]->LabelOnMedium()) &&
+		       Drives[drive]->DeleteVolumeLabel();
+	}
 	RealPt old_dta = dos.dta();
 	dos.dta(dos.tables.tempdta_fcbdelete);
 	RealPt new_dta=dos.dta();

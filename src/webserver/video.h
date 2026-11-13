@@ -7,8 +7,10 @@
 
 #include "http/http.h"
 
+#include "hardware/memory.h"
 #include "webserver/bridge.h"
 
+#include <optional>
 #include <string>
 
 namespace Webserver {
@@ -27,9 +29,16 @@ class ScreenTextCommand : public Command {
 	int bios_mode     = 0;
 	std::string text_dos = {};
 
+	std::optional<PhysPt> not_mapped_at = {};
+
 public:
 	void Execute() override;
 	static void Get(const httplib::Request& req, httplib::Response& res);
+
+	std::optional<PhysPt> NotMappedAt() const
+	{
+		return not_mapped_at;
+	}
 };
 
 } // namespace Webserver

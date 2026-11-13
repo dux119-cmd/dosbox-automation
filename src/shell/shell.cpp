@@ -526,7 +526,13 @@ bool SHELL_IsRunning()
 
 namespace {
 
-std::vector<std::string> pending_commands = {};
+struct PendingSet {
+	std::vector<std::string> lines = {};
+	bool as_batch                  = false;
+	std::function<void()> on_end   = {};
+};
+
+PendingSet pending = {};
 
 // "@" keeps a line off the screen and doubled percent signs come out of
 // the batch expansion as they went in.
@@ -544,12 +550,24 @@ std::string AsVerbatimBatchLine(const std::string_view line)
 
 class PendingLinesReader final : public LineReader {
 public:
-	explicit PendingLinesReader(const std::vector<std::string>& lines)
+	explicit PendingLinesReader(PendingSet set)
+	        : on_end(std::move(set.on_end))
 	{
-		for (const auto& line : lines) {
-			batch_lines.push_back(AsVerbatimBatchLine(line));
+		for (auto& line : set.lines) {
+			batch_lines.push_back(set.as_batch
+			                              ? std::move(line)
+			                              : AsVerbatimBatchLine(line));
 		}
 	}
+	~PendingLinesReader() override
+	{
+		if (on_end) {
+			on_end();
+		}
+	}
+	PendingLinesReader(const PendingLinesReader&)            = delete;
+	PendingLinesReader& operator=(const PendingLinesReader&) = delete;
+
 	void Reset() override
 	{
 		next = 0;
@@ -565,13 +583,14 @@ public:
 private:
 	std::vector<std::string> batch_lines = {};
 	size_t next                          = 0;
+	std::function<void()> on_end         = {};
 };
 
 } // namespace
 
 bool SHELL_QueuePendingCommands(std::vector<std::string> lines)
 {
-	if (!pending_commands.empty() || lines.empty()) {
+	if (!pending.lines.empty() || lines.empty()) {
 		return false;
 	}
 	const auto is_control = [](const char c) {
@@ -585,27 +604,46 @@ bool SHELL_QueuePendingCommands(std::vector<std::string> lines)
 			return false;
 		}
 	}
-	pending_commands = std::move(lines);
+	pending = {std::move(lines), false, {}};
 	return true;
+}
+
+bool SHELL_QueuePendingBatch(std::vector<std::string> lines,
+                             std::function<void()> on_end)
+{
+	if (!pending.lines.empty() || lines.empty()) {
+		return false;
+	}
+	pending = {std::move(lines), true, std::move(on_end)};
+	return true;
+}
+
+bool SHELL_PendingCommandsWaiting()
+{
+	return !pending.lines.empty();
 }
 
 std::vector<std::string> SHELL_TakePendingCommands()
 {
-	return std::exchange(pending_commands, {});
+	auto taken = std::exchange(pending, {});
+	if (taken.on_end) {
+		taken.on_end();
+	}
+	return std::move(taken.lines);
 }
 
 // The lines run as a batch on top of the stack, so a batch one of them
 // CALLs finishes before the next line (an EXIT) is read.
 void DOS_Shell::PushPendingCommands()
 {
-	auto lines = SHELL_TakePendingCommands();
-	if (lines.empty()) {
+	auto set = std::exchange(pending, {});
+	if (set.lines.empty()) {
 		return;
 	}
 	const auto current_echo = batchfiles.empty() ? echo
 	                                             : batchfiles.top().Echo();
 	batchfiles.emplace(*psp,
-	                   std::make_unique<PendingLinesReader>(lines),
+	                   std::make_unique<PendingLinesReader>(std::move(set)),
 	                   "",
 	                   "",
 	                   current_echo);
@@ -805,6 +843,7 @@ void SHELL_InitAndRun()
 	        "\nFailed to create/open a temporary file for piping. Check the %%TEMP%% variable.\n");
 
 	MSG_Add("SHELL_CMD_DIR_VOLUME", " Volume in drive %c is %s\n");
+	MSG_Add("SHELL_CMD_DIR_NO_LABEL", " Volume in drive %c has no label\n");
 	MSG_Add("SHELL_CMD_DIR_INTRO", " Directory of %s\n");
 	MSG_Add("SHELL_CMD_DIR_BYTES_USED", "%17d file(s) %21s bytes\n");
 	MSG_Add("SHELL_CMD_DIR_BYTES_FREE", "%17d dir(s)  %21s bytes free\n");
@@ -1402,6 +1441,11 @@ void SHELL_InitAndRun()
 	MSG_Add("SHELL_CMD_VOL_OUTPUT",
 	        "\n"
 	        " Volume in drive %c is %s\n"
+	        " Volume Serial Number is %04X-%04X\n"
+	        "\n");
+	MSG_Add("SHELL_CMD_VOL_OUTPUT_NO_LABEL",
+	        "\n"
+	        " Volume in drive %c has no label\n"
 	        " Volume Serial Number is %04X-%04X\n"
 	        "\n");
 

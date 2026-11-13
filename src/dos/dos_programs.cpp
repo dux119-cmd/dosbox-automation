@@ -16,6 +16,7 @@
 #include "programs/help.h"
 #include "programs/join.h"
 #include "programs/keyb.h"
+#include "programs/label.h"
 #include "programs/loadfix.h"
 #include "programs/loadrom.h"
 #include "programs/ls.h"
@@ -79,6 +80,7 @@ void DOS_SetupPrograms()
 	PROGRAMS_MakeFile("HELP.COM", ProgramCreate<HELP>);
 	PROGRAMS_MakeFile("JOIN.EXE", ProgramCreate<JOIN>);
 	PROGRAMS_MakeFile("KEYB.COM", ProgramCreate<KEYB>);
+	PROGRAMS_MakeFile("LABEL.COM", ProgramCreate<LABEL>);
 	PROGRAMS_MakeFile("LOADFIX.COM", ProgramCreate<LOADFIX>);
 	PROGRAMS_MakeFile("LOADROM.COM", ProgramCreate<LOADROM>);
 	PROGRAMS_MakeFile("LS.COM", ProgramCreate<LS>);

@@ -1,5 +1,6 @@
 // SPDX-FileCopyrightText:  2025-2026 The DOSBox Staging Team
 // SPDX-License-Identifier: GPL-2.0-or-later
+// Copyright (C) 2026 dosbox-automation contributors
 
 #include "sdl_renderer.h"
 
@@ -99,6 +100,16 @@ SdlRenderer::SdlRenderer(const int x, const int y,
 		flags &= ~SDL_WINDOW_OPENGL;
 
 		SDL_SetNumberProperty(props, SDL_PROP_WINDOW_CREATE_FLAGS_NUMBER, flags);
+		window = SDL_CreateWindowWithProperties(props);
+	}
+
+	if (!window) {
+		// On macOS SDL adds SDL_WINDOW_OPENGL to a window that names no
+		// graphics backend (SDL_video.c, SDL_DefaultGraphicsBackends),
+		// and the offscreen driver has no EGL there to back it.
+		SDL_SetBooleanProperty(props,
+		                       SDL_PROP_WINDOW_CREATE_EXTERNAL_GRAPHICS_CONTEXT_BOOLEAN,
+		                       true);
 		window = SDL_CreateWindowWithProperties(props);
 	}
 

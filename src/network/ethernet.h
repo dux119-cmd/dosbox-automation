@@ -77,6 +77,9 @@ public:
 EthernetConnection *ETHERNET_OpenConnection(const std::string &backend);
 
 void ETHERNET_AddConfigSection(const ConfigPtr& conf);
+
+// [ethernet] host_loopback: the guest may reach services on this machine.
+bool ETHERNET_HostLoopbackAllowed();
 void ETHERNET_Init();
 void ETHERNET_Destroy();
 

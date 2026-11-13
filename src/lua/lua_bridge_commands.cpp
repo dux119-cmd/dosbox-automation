@@ -341,7 +341,8 @@ void LuaStatusCommand::Execute()
 void LuaStatusCommand::Get(const httplib::Request&, httplib::Response& res)
 {
 	LuaStatusCommand cmd;
-	cmd.WaitForCompletion(15000);
+	// Below a client's 10 s read timeout: busy comes back as a 503 it resends.
+	cmd.WaitForCompletion(5000);
 
 	json j;
 	j["state"] = ScriptStateName(cmd.result.state);

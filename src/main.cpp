@@ -22,6 +22,7 @@
 #include <windows.h>
 #endif
 
+#include "augra/log.h"
 #include "config/config.h"
 #include "config/setup.h"
 #include "debugger/debugger.h"
@@ -32,10 +33,12 @@
 #include "dos/drives.h"
 #include "dos/programs/mount.h"
 #include "dos/programs/mount_archive_internal.h"
+#include "dos/programs/package_start.h"
 #include "dos/dos_locale.h"
 #include "gui/mapper.h"
 #include "gui/render/render.h"
 #include "misc/cross.h"
+#include "misc/home_folders.h"
 #include "shell/command_line.h"
 #include "shell/shell.h"
 #include "utils/checks.h"
@@ -147,8 +150,8 @@ static void register_command_line_help_message()
 	        "  --working-dir <path>     Set working directory to <path>. DOSBox will act as if\n"
 	        "                           started from this directory.\n"
 	        "\n"
-	        "  --run <name>             With an archive as PATH: the program to run from C:,\n"
-	        "                           an 8.3 path such as GAME\\START.EXE.\n"
+	        "  --run <name>             With an archive or a game folder as PATH: the program to\n"
+	        "                           run from C:, an 8.3 path such as GAME\\START.EXE.\n"
 	        "\n"
 	        "  --list-countries         List all supported countries with their numeric codes.\n"
 	        "                           Codes are to be used in the 'country' config setting.\n"
@@ -237,8 +240,9 @@ static int edit_primary_config()
 	replace_with_process("notepad++.exe");
 	replace_with_process("notepad.exe");
 
-	LOG_ERR("Can't find any text editors; please set the EDITOR env variable "
-	        "to your preferred text editor.\n");
+	augra::log_error("config",
+	                 "Can't find any text editors; please set the EDITOR env "
+	                 "variable to your preferred text editor.");
 
 	return 1;
 }
@@ -384,12 +388,14 @@ static void maybe_write_primary_config(const CommandLineArguments& args)
 			// the default settings to the primary config.
 			MSG_LoadMessages();
 			if (control->WriteConfig(primary_config_path)) {
-				LOG_MSG("CONFIG: Created primary config file '%s'",
-				        primary_config_path.string().c_str());
+				augra::log_info("config",
+				                "Created primary config file '%s'",
+				                primary_config_path.string().c_str());
 			} else {
 				// TODO convert to notification
-				LOG_WARNING("CONFIG: Unable to create primary config file '%s'",
-				            primary_config_path.string().c_str());
+				augra::log_warn("config",
+				                "Unable to create primary config file '%s'",
+				                primary_config_path.string().c_str());
 			}
 		}
 	}
@@ -567,19 +573,28 @@ static int sidecar_action(const std::string& action)
 	return 0;
 }
 
-static std::optional<int> maybe_handle_command_line_output_only_actions(
-        const CommandLineArguments& args, const char* program_name)
+// Answered before the config folder exists: neither needs it, and neither may
+// write a primary config or need HOME.
+static std::optional<int> maybe_answer_version_or_help(const CommandLineArguments& args,
+                                                       const char* program_name)
 {
 	if (args.version) {
 		printf(version_msg, DOSBOX_PROJECT_NAME, DOSBOX_GetDetailedVersion(), DOSBOX_PART_NUMBER);
 		return 0;
 	}
 	if (args.help) {
+		register_command_line_help_message();
 		const auto help = format_str(MSG_GetTranslatedRaw("DOSBOX_HELP"),
 		                             program_name);
 		printf("%s", help.c_str());
 		return 0;
 	}
+	return {};
+}
+
+static std::optional<int> maybe_handle_command_line_output_only_actions(
+        const CommandLineArguments& args)
+{
 	if (args.editconf) {
 		return edit_primary_config();
 	}
@@ -617,50 +632,6 @@ static std::optional<int> maybe_handle_command_line_output_only_actions(
 	return {};
 }
 
-static void handle_cli_set_commands(const std::vector<std::string>& set_args)
-{
-	for (auto command : set_args) {
-		trim(command);
-
-		if (command.empty() || command[0] == '%' || command[0] == '\0' ||
-		    command[0] == '#' || command[0] == '\n') {
-			continue;
-		}
-
-		std::vector<std::string> parameters(1, command);
-
-		if (const auto warning_message = control->SetPropertyFromCli(parameters);
-		    !warning_message.empty()) {
-
-			// TODO convert to notification
-			LOG_WARNING("CONFIG: %s", warning_message.c_str());
-
-		} else {
-			auto section = control->GetSection(parameters[0]);
-			std::string value(parameters[2]);
-
-			// Due to parsing, there can be a '=' at the
-			// start of the value.
-			while (value.size() &&
-			       (value.at(0) == ' ' || value.at(0) == '=')) {
-				value.erase(0, 1);
-			}
-
-			for (size_t i = 3; i < parameters.size(); i++) {
-				value += (std::string(" ") + parameters[i]);
-			}
-
-			auto input_line = parameters[1] + "=" + value;
-			bool change_success = section->HandleInputLine(input_line);
-
-			if (!change_success && !value.empty()) {
-				// TODO convert to notification
-				LOG_WARNING("CONFIG: Cannot set '%s'",
-				            input_line.c_str());
-			}
-		}
-	}
-}
 
 #if defined(WIN32) && !(C_DEBUGGER)
 static void apply_windows_debugger_workaround(const bool is_console_disabled)
@@ -699,8 +670,9 @@ static void maybe_create_resource_directories()
 {
 	auto try_create_resource_dir = [](std_fs::path const& dir) {
 		if (!create_dir_if_not_exist(dir)) {
-			LOG_WARNING("CONFIG: Can't create directory '%s'",
-						dir.string().c_str());
+			augra::log_warn("config",
+			                "Can't create directory '%s'",
+			                dir.string().c_str());
 		}
 	};
 	const auto plugins_dir = get_config_dir() / PluginsDir;
@@ -795,6 +767,12 @@ int main(int argc, char* argv[])
 	// have been handled.
 	init_logger(*arguments, argc, argv);
 
+	assert(argv && argv[0]);
+	if (const auto return_code = maybe_answer_version_or_help(*arguments,
+	                                                          argv[0])) {
+		return *return_code;
+	}
+
 	const auto version_string = DOSBOX_GetDetailedVersion();
 
 	SDL_SetAppMetadataProperty(SDL_PROP_APP_METADATA_NAME_STRING, DOSBOX_PROJECT_NAME);			
@@ -803,13 +781,23 @@ int main(int argc, char* argv[])
 	SDL_SetAppMetadataProperty(SDL_PROP_APP_METADATA_COPYRIGHT_STRING, DOSBOX_COPYRIGHT);			
 	SDL_SetAppMetadataProperty(SDL_PROP_APP_METADATA_URL_STRING, DOSBOX_WEBSITE);			
 
-	LOG_MSG("%s version %s (%s)", DOSBOX_PROJECT_NAME, version_string, DOSBOX_PART_NUMBER);
-	LOG_MSG("---");
+	augra::log_info("dosbox",
+	                "%s version %s (%s)",
+	                DOSBOX_PROJECT_NAME,
+	                version_string,
+	                DOSBOX_PART_NUMBER);
+	augra::log_info("dosbox", "---");
 
-	LOG_MSG("Loguru version %d.%d.%d initialised",
-	        LOGURU_VERSION_MAJOR,
-	        LOGURU_VERSION_MINOR,
-	        LOGURU_VERSION_PATCH);
+	augra::log_info("dosbox",
+	                "Loguru version %d.%d.%d initialised",
+	                LOGURU_VERSION_MAJOR,
+	                LOGURU_VERSION_MINOR,
+	                LOGURU_VERSION_PATCH);
+
+	if (const auto refusal = HomeFolders::CheckHost()) {
+		augra::log_error("config", "%s", refusal->c_str());
+		return 1;
+	}
 
 	int return_code = 0;
 
@@ -818,8 +806,9 @@ int main(int argc, char* argv[])
 			std::error_code ec;
 			std_fs::current_path(arguments->working_dir, ec);
 			if (ec) {
-				LOG_ERR("Cannot set working directory to '%s'",
-				        arguments->working_dir.c_str());
+				augra::log_error("dosbox",
+				                 "Cannot set working directory to '%s'",
+				                 arguments->working_dir.c_str());
 			}
 		}
 
@@ -856,19 +845,21 @@ int main(int argc, char* argv[])
 		// After DOSBOX_InitModuleConfigsAndMessages() all the config
 		// sections have been registered, so we're ready to parse the
 		// config files.
-		control->ParseConfigFiles(get_config_dir());
+		control->ParseConfigFiles(get_config_dir(), [&] {
+			// The package start reads --set's archive settings; it is
+			// applied again below to win over the confs.
+			control->ApplySetCommands(arguments->set, false);
+			PackageStart::LoadCommandLinePackage(*control);
+		});
 
 		// Handle command line options that don't start the emulator but
 		// only perform some actions and print the results to the console.
-		assert(argv && argv[0]);
-		const auto program_name = argv[0];
-
 		// Before the display-less actions: --set reaches a status query
 		// or an empty the same way it reaches the emulator.
-		handle_cli_set_commands(arguments->set);
+		control->ApplySetCommands(arguments->set);
 
 		if (const auto return_code = maybe_handle_command_line_output_only_actions(
-		            *arguments, program_name);
+		            *arguments);
 		    return_code) {
 
 			// Exit to the command line
@@ -907,13 +898,13 @@ int main(int argc, char* argv[])
 	} catch (char* error) {
 		// TODO Maybe show popup dialog with the error in addition to
 		// logging it (use the tiny osdialog lib).
-		LOG_ERR("Unexpected error: %s", error);
+		augra::log_error("dosbox", "Unexpected error: %s", error);
 		return_code = 1;
 
 	} catch (const std::exception& e) {
 		// TODO Maybe show popup dialog with the error in addition to
 		// logging it (use the tiny osdialog lib).
-		LOG_ERR("Standard library exception: %s", e.what());
+		augra::log_error("dosbox", "Standard library exception: %s", e.what());
 		return_code = 1;
 
 	} catch (...) {

@@ -1,6 +1,7 @@
 // SPDX-FileCopyrightText:  2021-2026 The DOSBox Staging Team
 // SPDX-FileCopyrightText:  2002-2021 The DOSBox Team
 // SPDX-License-Identifier: GPL-2.0-or-later
+// Copyright (C) 2026 dosbox-automation contributors
 
 #include "cpu/paging.h"
 
@@ -993,6 +994,30 @@ void PAGING_Enable(bool enabled) {
 bool PAGING_Enabled()
 {
 	return paging.enabled;
+}
+
+// The fault conditions of InitPage, walked with the check-only helper; this
+// restores the CR2 and pending exception the helper sets on a miss.
+bool PAGING_HostCanAccess(const PhysPt lin_addr, const bool writing)
+{
+	if (!paging.enabled) {
+		return true;
+	}
+	const auto saved_cr2       = paging.cr2;
+	const auto saved_exception = cpu.exception;
+
+	X86PageEntry table;
+	X86PageEntry entry;
+	auto accessible = InitPageCheckPresence_CheckOnly(lin_addr, writing, table, entry);
+	if (accessible && USERWRITE_PROHIBITED) {
+		const auto read_only = (entry.wr == 0) || (table.wr == 0);
+		accessible = !InitPage_CheckUseraccess(entry.us, table.us) &&
+		             !(writing && read_only);
+	}
+
+	paging.cr2    = saved_cr2;
+	cpu.exception = saved_exception;
+	return accessible;
 }
 
 class PAGING final {

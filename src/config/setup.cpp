@@ -1097,7 +1097,8 @@ bool SectionProp::HandleInputLine(const std::string& line)
 
 	// Find the configuration setting and try to set it
 	for (auto& prop : properties) {
-		if (strcasecmp(prop->propname.c_str(), setting_name.c_str()) != 0) {
+		// By length: a NUL in the name must not end the comparison early
+		if (!iequals(prop->propname, setting_name)) {
 			continue;
 		}
 
@@ -1126,7 +1127,7 @@ bool SectionProp::HandleInputLine(const std::string& line)
 	NOTIFY_DisplayWarning(Notification::Source::Console,
 	                      "CONFIG",
 	                      "PROGRAM_CONFIG_SECTION_OR_SETTING_NOT_FOUND",
-	                      setting_name.c_str());
+	                      escape_control_bytes(setting_name).c_str());
 	return false;
 }
 

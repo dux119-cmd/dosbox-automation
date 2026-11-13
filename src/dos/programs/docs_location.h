@@ -13,6 +13,10 @@
 // ("introduction/about-this-manual/"); empty means the root.
 namespace DocsLocation {
 
+// The release a version string belongs to: 0.86.0-pre1 reads the manual
+// of 0.86.0. The site has one tree per full release version.
+std::string ReleaseVersion(std::string_view version);
+
 std::string OnlineUrl(std::string_view page);
 
 std::string BundledRelativePath(std::string_view page);

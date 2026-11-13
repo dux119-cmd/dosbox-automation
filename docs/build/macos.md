@@ -4,8 +4,10 @@ dosbox-automation builds on macOS with Apple Clang and either Homebrew
 libraries or vcpkg. Both paths use the Ninja generator and the Command
 Line Tools; full Xcode.app is not required.
 
-Verified on macOS 26.6.2 (Tahoe), Apple Clang 21.0, CMake 4.4.3, Mac
-mini M1 (arm64). The full unit test suite passes on the Homebrew build.
+You need an Apple Clang with C++23 support and CMake 3.25 or newer. Known to
+build and pass the unit tests: macOS 26.6.2 (Tahoe) with Apple Clang 21.0 and
+CMake 4.4.3 on a Mac mini M1, and macOS 15.7.3 with Apple Clang 17 on an
+Apple Silicon laptop. Older versions are untested, not ruled out.
 
 
 ## Prerequisites

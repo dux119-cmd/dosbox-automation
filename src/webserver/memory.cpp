@@ -6,6 +6,10 @@
 #include "bridge.h"
 #include "private/memory.h"
 
+#include <algorithm>
+#include <span>
+
+#include "augra/log.h"
 #include "base64/base64.h"
 #include "http/http.h"
 #include "nlohmann/json.hpp"
@@ -13,6 +17,7 @@
 
 #include "cpu/registers.h"
 #include "dos/dos_memory.h"
+#include "hardware/guest_memory.h"
 #include "hardware/memory.h"
 
 using json = nlohmann::json;
@@ -74,27 +79,42 @@ static void parse_mem_addr(const httplib::Request& req, Segment& segment,
 	}
 }
 
+static std::string RangeError(const uint32_t start, const uint64_t len)
+{
+	const auto limit = GuestMemory::AddressLimit();
+	if (start + len <= limit) {
+		return {};
+	}
+	const auto range = format_str("Address range 0x%x + %llu",
+	                              start,
+	                              static_cast<unsigned long long>(len));
+	if (limit == uint64_t{1} << 32) {
+		return range + " exceeds the 4 GB linear address space";
+	}
+	return range + format_str(" exceeds emulated memory size (%llu bytes)",
+	                          static_cast<unsigned long long>(limit));
+}
+
 void ReadMemoryCommand::Execute()
 {
 	regs.load();
 	effective_addr = base_segment_to_offset(base) + offset;
 
-	LOG_DEBUG("API: ReadMemoryCommand(0x%06x, %d)", effective_addr, len);
+	augra::log_debug("webserver", "ReadMemoryCommand(0x%06x, %u)", effective_addr, len);
 
-	const uint64_t mem_total = static_cast<uint64_t>(MEM_TotalPages()) *
-	                           MemPageSize;
-
-	const uint64_t end_addr = static_cast<uint64_t>(effective_addr) + len;
-
-	if (end_addr > mem_total) {
-		error = "Address range 0x" + std::to_string(effective_addr) + " + " +
-		        std::to_string(len) + " exceeds emulated memory size (" +
-		        std::to_string(mem_total) + " bytes)";
+	error = RangeError(effective_addr, len);
+	if (!error.empty()) {
 		return;
 	}
 
 	memory.resize(len);
-	MEM_BlockRead(effective_addr, memory.data(), len);
+	const auto read = GuestMemory::Read(effective_addr,
+	                                    {reinterpret_cast<uint8_t*>(memory.data()),
+	                                     memory.size()});
+	if (!read) {
+		not_mapped_at = read.error();
+		memory.clear();
+	}
 }
 
 void ReadMemoryCommand::Get(const Request& req, Response& res)
@@ -113,6 +133,9 @@ void ReadMemoryCommand::Get(const Request& req, Response& res)
 
 	if (!cmd.error.empty()) {
 		throw std::out_of_range(cmd.error);
+	}
+	if (cmd.not_mapped_at) {
+		throw GuestPageNotMapped(*cmd.not_mapped_at);
 	}
 
 	if (req.get_header_value("accept").starts_with(TypeJson)) {
@@ -136,28 +159,39 @@ void WriteMemoryCommand::Execute()
 {
 	effective_addr = base_segment_to_offset(base) + offset;
 
-	LOG_DEBUG("API: WriteMemoryCommand(0x%06x, %d)", effective_addr, data.size());
+	augra::log_debug("webserver",
+	                 "WriteMemoryCommand(0x%06x, %zu)",
+	                 effective_addr,
+	                 data.size());
 
-	const uint64_t mem_total = static_cast<uint64_t>(MEM_TotalPages()) *
-	                           MemPageSize;
+	error = RangeError(effective_addr, data.size());
+	if (!error.empty()) {
+		return;
+	}
 
-	const uint64_t end_addr = static_cast<uint64_t>(effective_addr) +
-	                          data.size();
+	const auto bytes = [](std::string& s) {
+		return std::span<uint8_t>(reinterpret_cast<uint8_t*>(s.data()),
+		                          s.size());
+	};
 
-	if (end_addr > mem_total) {
-		error = "Address range 0x" + std::to_string(effective_addr) +
-		        " + " + std::to_string(data.size()) +
-		        " exceeds emulated memory size (" +
-		        std::to_string(mem_total) + " bytes)";
+	if (const auto writable = GuestMemory::CheckRange(effective_addr,
+	                                                  data.size(),
+	                                                  true);
+	    !writable) {
+		not_mapped_at = writable.error();
 		return;
 	}
 
 	if (!expected_data.empty()) {
 		conflict_data.resize(expected_data.size());
 
-		MEM_BlockRead(effective_addr,
-		              conflict_data.data(),
-		              conflict_data.size());
+		if (const auto read = GuestMemory::Read(effective_addr,
+		                                        bytes(conflict_data));
+		    !read) {
+			not_mapped_at = read.error();
+			conflict_data.clear();
+			return;
+		}
 
 		if (expected_data != conflict_data) {
 			return;
@@ -166,7 +200,10 @@ void WriteMemoryCommand::Execute()
 		conflict_data.clear();
 	}
 
-	MEM_BlockWrite(effective_addr, data.data(), data.size());
+	if (const auto written = GuestMemory::Write(effective_addr, bytes(data));
+	    !written) {
+		not_mapped_at = written.error();
+	}
 }
 
 void WriteMemoryCommand::Put(const httplib::Request& req, httplib::Response& res)
@@ -217,6 +254,9 @@ void WriteMemoryCommand::Put(const httplib::Request& req, httplib::Response& res
 	if (!cmd.error.empty()) {
 		throw std::out_of_range(cmd.error);
 	}
+	if (cmd.not_mapped_at) {
+		throw GuestPageNotMapped(*cmd.not_mapped_at);
+	}
 
 	json j;
 	j["memory"]["addr"] = cmd.effective_addr;
@@ -230,7 +270,7 @@ void WriteMemoryCommand::Put(const httplib::Request& req, httplib::Response& res
 
 // --- Memory value scan ---
 
-std::vector<uint32_t> ScanBufferForValue(const std::vector<uint8_t>& buf,
+std::vector<uint32_t> ScanBufferForValue(const std::span<const uint8_t> buf,
                                          const uint32_t value, const int width)
 {
 	if (width != 1 && width != 2 && width != 4) {
@@ -252,21 +292,54 @@ std::vector<uint32_t> ScanBufferForValue(const std::vector<uint8_t>& buf,
 	return hits;
 }
 
+std::vector<uint32_t> ScanMappedForValue(const std::span<const uint8_t> buf,
+                                         const uint32_t base,
+                                         const std::vector<GuestMemory::Range>& skipped,
+                                         const uint32_t value, const int width)
+{
+	if (width != 1 && width != 2 && width != 4) {
+		throw std::invalid_argument("width must be 1, 2, or 4");
+	}
+	const auto offset_of = [&](const PhysPt address) {
+		const auto offset = int64_t{address} - int64_t{base};
+		return static_cast<size_t>(std::clamp<int64_t>(
+		        offset, 0, static_cast<int64_t>(buf.size())));
+	};
+
+	std::vector<uint32_t> hits = {};
+	size_t run_start           = 0;
+
+	const auto scan_run = [&](const size_t run_end) {
+		if (run_end <= run_start) {
+			return;
+		}
+		const auto run = buf.subspan(run_start, run_end - run_start);
+		for (const auto hit : ScanBufferForValue(run, value, width)) {
+			hits.push_back(base + static_cast<uint32_t>(run_start) + hit);
+		}
+	};
+	for (const auto& hole : skipped) {
+		scan_run(offset_of(hole.start));
+		run_start = std::max(run_start, offset_of(hole.end));
+	}
+	scan_run(buf.size());
+	return hits;
+}
+
 void SearchMemoryCommand::Execute()
 {
-	const uint64_t mem_total = static_cast<uint64_t>(MEM_TotalPages()) *
-	                           MemPageSize;
-	if (end > mem_total || start >= end) {
+	if (end > GuestMemory::AddressLimit() || start >= end) {
 		error = "Invalid search range";
 		return;
 	}
-	const auto len = end - start;
-	std::vector<uint8_t> buf(len);
-	MEM_BlockRead(start, buf.data(), len);
-	matches = ScanBufferForValue(buf, value, width);
-	for (auto& m : matches) {
-		m += start;
+	std::vector<uint8_t> buf(end - start);
+	const auto mapped = GuestMemory::ReadMapped(start, buf);
+	if (!mapped) {
+		error = "Invalid search range";
+		return;
 	}
+	skipped = *mapped;
+	matches = ScanMappedForValue(buf, start, skipped, value, width);
 }
 
 void SearchMemoryCommand::Post(const Request& req, Response& res)
@@ -296,6 +369,13 @@ void SearchMemoryCommand::Post(const Request& req, Response& res)
 
 	json result;
 	result["matches"] = cmd.Matches();
+	result["skipped"] = json::array();
+	for (const auto& range : cmd.Skipped()) {
+		json skipped;
+		skipped["start"] = range.start;
+		skipped["end"]   = range.end;
+		result["skipped"].push_back(skipped);
+	}
 	send_json(res, result);
 }
 

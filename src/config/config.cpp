@@ -144,6 +144,7 @@ Config& Config::operator=(Config&& source) noexcept
 	config_files   = std::move(source.config_files);
 
 	loaded_config_paths_canonical = std::move(source.loaded_config_paths_canonical);
+	anchor_config_path = std::move(source.anchor_config_path);
 
 	overwritten_autoexec_section = std::move(source.overwritten_autoexec_section);
 	overwritten_autoexec_conf = std::move(source.overwritten_autoexec_conf);
@@ -156,6 +157,7 @@ Config& Config::operator=(Config&& source) noexcept
 	source.startup_params                = {};
 	source.config_files                  = {};
 	source.loaded_config_paths_canonical = {};
+	source.anchor_config_path.clear();
 
 	return *this;
 }
@@ -238,6 +240,9 @@ bool Config::ParseConfigFile(const std::string& type,
 
 	config_files.push_back(config_file_name);
 	loaded_config_paths_canonical.push_back(canonical_path);
+	if (type != "primary") {
+		anchor_config_path = canonical_path;
+	}
 
 	// Get directory from config_file_name, used with relative paths.
 	current_config_dir = canonical_path.parent_path();
@@ -246,8 +251,64 @@ bool Config::ParseConfigFile(const std::string& type,
 	// while this handles the overwrriten mode. We need to be prepared for
 	// either scenario to play out because we won't know the users final
 	// preference until the very last configuration file is processed.
+	ParseConfigLines(
+	        [&](std::string& line) {
+		        return static_cast<bool>(getline(input_stream, line));
+	        },
+	        config_file_name);
 
+	// So internal changes don't use the path information
+	current_config_dir.clear();
+
+	LOG_INFO("CONFIG: Loaded %s config file '%s'",
+	         type.c_str(),
+	         config_file_name.c_str());
+
+	return true;
+}
+
+std::vector<std::string> Config::ParseConfigText(
+        const std::string& type, const std::string& config_name,
+        const std::string_view text, const std_fs::path& base_dir,
+        const AutoexecLine& autoexec_line,
+        const std::vector<std::string>& ignored_sections)
+{
+	current_config_dir = base_dir;
+
+	// Lines as getline cuts a file: at each '\n', none after a final one.
+	size_t pos         = 0;
+	const auto ignored = ParseConfigLines(
+	        [&](std::string& line) {
+		        if (pos >= text.size()) {
+			        return false;
+		        }
+		        const auto end = std::min(text.find('\n', pos), text.size());
+		        line.assign(text.substr(pos, end - pos));
+		        pos = end + 1;
+		        return true;
+	        },
+	        config_name,
+	        autoexec_line,
+	        ignored_sections);
+
+	current_config_dir.clear();
+
+	LOG_INFO("CONFIG: Loaded %s config file '%s'",
+	         type.c_str(),
+	         escape_control_bytes(config_name).c_str());
+
+	return ignored;
+}
+
+std::vector<std::string> Config::ParseConfigLines(
+        const std::function<bool(std::string&)>& next_line,
+        const std::string& config_file_name,
+        const std::function<std::optional<std::string>(const std::string&)>& autoexec_line,
+        const std::vector<std::string>& ignored_sections)
+{
 	std::string line = {};
+
+	std::vector<std::string> ignored_settings = {};
 
 	Section* current_section = nullptr;
 	bool is_autoexec_section = false;
@@ -266,6 +327,29 @@ bool Config::ParseConfigFile(const std::string& type,
 		return !line.empty() && line[0] == '[';
 	};
 
+	// "section.key" names one setting; the section the line lands in decides.
+	auto is_ignored_setting = [&](const Section& section,
+	                              const std::string& line) {
+		auto key = line.substr(0, line.find('='));
+		trim(key);
+		const auto name    = std::string(section.GetName()) + "." + key;
+		const auto ignored = std::any_of(ignored_sections.begin(),
+		                                 ignored_sections.end(),
+		                                 [&](const std::string& entry) {
+			                                 return iequals(entry, name);
+		                                 });
+		if (ignored) {
+			LOG_INFO("CONFIG: Setting [%s] %s of '%s' ignored",
+			         section.GetName(),
+			         escape_control_bytes(key).c_str(),
+			         escape_control_bytes(config_file_name).c_str());
+			auto canonical = name;
+			lowcase(canonical);
+			ignored_settings.push_back(std::move(canonical));
+		}
+		return ignored;
+	};
+
 	auto handle_autoexec_line = [&]() {
 		// Ignore all the empty lines until the meaningful [autoexec]
 		// content starts
@@ -276,13 +360,23 @@ bool Config::ParseConfigFile(const std::string& type,
 			is_autoexec_started = true;
 		}
 
-		if (!is_comment(line)) {
-			current_section->HandleInputLine(line);
-			OverwriteAutoexec(config_file_name, line);
+		if (is_comment(line)) {
+			return;
 		}
+		if (autoexec_line) {
+			const auto kept = autoexec_line(line);
+			if (!kept) {
+				return;
+			}
+			current_section->HandleInputLine(*kept);
+			OverwriteAutoexec(config_file_name, *kept);
+			return;
+		}
+		current_section->HandleInputLine(line);
+		OverwriteAutoexec(config_file_name, line);
 	};
 
-	while (getline(input_stream, line)) {
+	while (next_line(line)) {
 		trim(line);
 
 		if (is_section_start(line)) {
@@ -305,27 +399,52 @@ bool Config::ParseConfigFile(const std::string& type,
 			// New section
 			const auto bracket_pos = line.find(']');
 			if (bracket_pos == std::string::npos) {
+				is_autoexec_section = current_section &&
+				                      iequals(current_section->GetName(),
+				                              "autoexec");
 				continue;
 			}
 			line.erase(bracket_pos);
 			const auto section_name = line.substr(1);
+			const auto ignored = std::any_of(ignored_sections.begin(),
+			                                 ignored_sections.end(),
+			                                 [&](const std::string& name) {
+				                                 return iequals(name, section_name);
+			                                 });
+			if (ignored) {
+				LOG_INFO("CONFIG: Section [%s] of '%s' ignored",
+				         escape_control_bytes(section_name).c_str(),
+				         escape_control_bytes(config_file_name).c_str());
+				current_section = nullptr;
+				continue;
+			}
 			if (const auto sec = GetSection(section_name); sec) {
 				current_section = sec;
-				is_autoexec_section = (section_name == "autoexec");
 			}
+			// GetSection ignores case and an unknown section keeps the one
+			// before it, so the section decides, not the spelling.
+			is_autoexec_section = current_section &&
+			                      iequals(current_section->GetName(), "autoexec");
 		} else if (current_section) {
+			// No setting takes control bytes, and a warning about the value
+			// would print them raw to the console and the log
+			const auto has_control_byte = std::any_of(line.begin(), line.end(), [](const char c) {
+				const auto byte = static_cast<unsigned char>(c);
+				return (byte < 0x20 && byte != '\t') || byte == 0x7f;
+			});
+			if (has_control_byte) {
+				LOG_WARNING("CONFIG: A line with control bytes in '%s' was left out: %s",
+				            escape_control_bytes(config_file_name).c_str(),
+				            escape_control_bytes(line).c_str());
+				continue;
+			}
+			if (is_ignored_setting(*current_section, line)) {
+				continue;
+			}
 			current_section->HandleInputLine(line);
 		}
 	}
-
-	// So internal changes don't use the path information
-	current_config_dir.clear();
-
-	LOG_INFO("CONFIG: Loaded %s config file '%s'",
-	         type.c_str(),
-	         config_file_name.c_str());
-
-	return true;
+	return ignored_settings;
 }
 
 // Applies queued configuration settings to CLI arguments. It replaces any
@@ -372,6 +491,56 @@ void Config::ApplyQueuedValuesToCli(std::vector<std::string>& args) const
 	}
 }
 
+void Config::ApplySetCommands(
+        const std::vector<std::string>& set_args, const bool report_problems,
+        const std::function<bool(const std::string&, const std::string&)>& only)
+{
+	for (auto command : set_args) {
+		trim(command);
+
+		if (command.empty() || command[0] == '%' || command[0] == '\0' ||
+		    command[0] == '#' || command[0] == '\n') {
+			continue;
+		}
+
+		std::vector<std::string> parameters(1, command);
+
+		if (const auto warning_message = SetPropertyFromCli(parameters);
+		    !warning_message.empty()) {
+
+			if (report_problems) {
+				LOG_WARNING("CONFIG: %s", warning_message.c_str());
+			}
+
+		} else {
+			auto section = GetSection(parameters[0]);
+			if (only && !only(section->GetName(), parameters[1])) {
+				continue;
+			}
+			std::string value(parameters[2]);
+
+			// Due to parsing, there can be a '=' at the
+			// start of the value.
+			while (value.size() &&
+			       (value.at(0) == ' ' || value.at(0) == '=')) {
+				value.erase(0, 1);
+			}
+
+			for (size_t i = 3; i < parameters.size(); i++) {
+				value += (std::string(" ") + parameters[i]);
+			}
+
+			auto input_line = parameters[1] + "=" + value;
+			bool change_success = section->HandleInputLine(input_line);
+
+			if (!change_success && !value.empty() && report_problems) {
+				LOG_WARNING("CONFIG: Cannot set '%s'",
+				            input_line.c_str());
+			}
+		}
+	}
+}
+
 StartupVerbosity Config::GetStartupVerbosity() const
 {
 	const Section* s = GetSection("dosbox");
@@ -409,7 +578,8 @@ const std::string& Config::GetArgumentLanguage()
 
 // Parse the user's configuration files starting with the primary, then custom
 // -conf's, and finally the local dosbox.conf
-void Config::ParseConfigFiles(const std_fs::path& config_dir)
+void Config::ParseConfigFiles(const std_fs::path& config_dir,
+                              const std::function<void()>& after_local)
 {
 	// First: parse the user's primary 'dosbox-automation.conf' config file
 	const bool load_primary_config = !arguments.noprimaryconf;
@@ -424,6 +594,11 @@ void Config::ParseConfigFiles(const std_fs::path& config_dir)
 
 	if (load_local_config) {
 		ParseConfigFile("local", "dosbox.conf");
+	}
+
+	// Third: the command line's package conf; the -conf files after it win (ada-0lv8)
+	if (after_local) {
+		after_local();
 	}
 
 	// Finally: layer on additional config files specified with the '-conf'

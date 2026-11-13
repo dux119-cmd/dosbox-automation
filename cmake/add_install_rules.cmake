@@ -51,6 +51,7 @@ function(add_install_rules)
     # THIRD_PARTY_LICENSES.txt instead.
     install(FILES
             "${CMAKE_CURRENT_BINARY_DIR}/doc/LICENSE"
+            "${CMAKE_CURRENT_BINARY_DIR}/doc/NOTICE"
             "${CMAKE_CURRENT_BINARY_DIR}/doc/THIRD_PARTY_LICENSES.txt"
             DESTINATION "${INSTALL_DIR_DOC}")
 

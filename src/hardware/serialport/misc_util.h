@@ -1,5 +1,6 @@
 // SPDX-FileCopyrightText:  2002-2025 The DOSBox Team
 // SPDX-License-Identifier: GPL-2.0-or-later
+// Copyright (C) 2026 dosbox-automation contributors
 
 #ifndef DOSBOX_MISC_UTIL_H
 #define DOSBOX_MISC_UTIL_H
@@ -47,6 +48,9 @@ enum class SocketState {
 	Empty,
 	Closed,
 };
+
+// Loopback and unspecified addresses, IPv4 inside IPv6 included.
+bool IsAddressOfThisMachine(const asio::ip::address& address);
 
 // --- GENERIC NET INTERFACE -------------------------------------------------
 

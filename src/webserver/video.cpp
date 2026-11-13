@@ -232,6 +232,7 @@ void VideoHandlers::GetFrame(const httplib::Request& req, httplib::Response& res
 	} else {
 		if (!RENDER_HasSharedFrame()) {
 			res.status = 503;
+			res.set_header("Retry-After", "1");
 			json err;
 			err["error"] = "No frame available yet";
 			send_json(res, err);
@@ -273,6 +274,7 @@ void VideoHandlers::GetFrameInfo(const httplib::Request&, httplib::Response& res
 {
 	if (!RENDER_HasSharedFrame()) {
 		res.status = 503;
+		res.set_header("Retry-After", "1");
 		json err;
 		err["error"] = "No frame available yet";
 		send_json(res, err);
@@ -315,18 +317,27 @@ void ScreenTextCommand::Execute()
 		return;
 	}
 
-	// Same live BIOS-data-area reads ReadScreenText uses, so the
+	auto text = Lua::ReadScreenText();
+	if (!text) {
+		not_mapped_at = text.error();
+		return;
+	}
+	text_dos = std::move(*text);
+
+	// Same live BIOS-data-area reads ReadScreenText used, so the
 	// reported geometry matches the buffer it actually walked.
-	columns  = real_readw(BIOSMEM_SEG, BIOSMEM_NB_COLS);
-	rows     = CurMode->theight;
-	page     = real_readb(BIOSMEM_SEG, BIOSMEM_CURRENT_PAGE);
-	text_dos = Lua::ReadScreenText();
+	columns = real_readw(BIOSMEM_SEG, BIOSMEM_NB_COLS);
+	rows    = CurMode->theight;
+	page    = real_readb(BIOSMEM_SEG, BIOSMEM_CURRENT_PAGE);
 }
 
 void ScreenTextCommand::Get(const httplib::Request&, httplib::Response& res)
 {
 	ScreenTextCommand cmd;
 	cmd.WaitForCompletion();
+	if (cmd.not_mapped_at) {
+		throw GuestPageNotMapped(*cmd.not_mapped_at);
+	}
 
 	json j;
 	j["is_text_mode"] = cmd.is_text_mode;

@@ -1,5 +1,6 @@
 // SPDX-FileCopyrightText:  2025-2025 The DOSBox Staging Team
 // SPDX-License-Identifier: GPL-2.0-or-later
+// Copyright (C) 2026 dosbox-automation contributors
 
 #include "ethernet.h"
 
@@ -114,6 +115,16 @@ static void init_ethernet_config_settings(SectionProp& section)
 	                       "default). The format is the same as for TCP port forwards.");
 
 	pstring->SetEnabledOptions({"SLIRP"});
+
+	pbool = section.AddBool("host_loopback", WhenIdle, false);
+	pbool->SetOptionHelp(
+	        "SLIRP",
+	        "Let the DOS guest reach services on the host's own loopback address through\n"
+	        "the gateway 10.0.2.2 ('off' by default). The REST API listens there, so switch\n"
+	        "this on only for a program that needs a service on this machine. Only the\n"
+	        "host's config files and --set can switch it on.");
+
+	pbool->SetEnabledOptions({"SLIRP"});
 }
 
 void ETHERNET_Init()
@@ -134,6 +145,14 @@ static void notify_ethernet_setting_updated(SectionProp& section,
 {
 	NE2K_Destroy();
 	NE2K_Init(section);
+}
+
+bool ETHERNET_HostLoopbackAllowed()
+{
+	const auto section = control ? dynamic_cast<SectionProp*>(
+	                                       control->GetSection("ethernet"))
+	                             : nullptr;
+	return section && section->GetBool("host_loopback");
 }
 
 void ETHERNET_AddConfigSection(const ConfigPtr& conf)

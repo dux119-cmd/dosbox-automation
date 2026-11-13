@@ -133,7 +133,7 @@ ArchiveSettings ReadArchiveSettings()
 	s.memory_limit_bytes = section->GetInt("archive_memory_limit") * MiB;
 	s.max_entries        = section->GetInt("archive_max_entries");
 	s.max_size_bytes     = section->GetInt("archive_max_size") * MiB;
-	s.sequential_allowed = section->GetString("archive_sequential") == "cache";
+	s.sequential_allowed = section->GetString("archive_sequential") != "refuse";
 	return s;
 }
 
@@ -714,6 +714,9 @@ bool MOUNT::MountArchive(MountParameters& params)
 	}
 
 	auto root = NormalizeRoot(params.archive_root);
+	if (root.empty() && IsAutomountLayout(source->Entries())) {
+		WriteOut(MSG_Get("PROGRAM_MOUNT_ARCHIVE_DRIVES_LAYOUT"));
+	}
 	if (root.empty()) {
 		root = SoloRootDirectory(source->Entries());
 		if (!root.empty()) {
@@ -782,6 +785,10 @@ bool MOUNT::MountArchive(MountParameters& params)
 		return {std::move(entry.entered->leaf), std::move(fresh_held)};
 	};
 
+	// Nothing else reads a sequential archive, so it is unpacked.
+	if (source->GetAccess() == Access::Sequential && !leased.lease->IsComplete()) {
+		WriteOut(MSG_Get("PROGRAM_MOUNT_ARCHIVE_UNPACKING"), shown.c_str());
+	}
 	auto made = ArchiveDrive::Create(std::move(source),
 	                                 std::move(leased.lease),
 	                                 root,
@@ -887,6 +894,9 @@ bool MOUNT::MountArchive(MountParameters& params)
 	}
 	if (params.scratch) {
 		WriteOut(MSG_Get("PROGRAM_MOUNT_ARCHIVE_SCRATCH"), params.drive);
+	}
+	if (members.empty()) {
+		params.mounted_archive = resolved;
 	}
 	return true;
 }

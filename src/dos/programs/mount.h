@@ -87,6 +87,13 @@ struct MountParameters {
 	// Design D8: -run with its optional name, -exit to leave after it.
 	std::optional<std::string> run = {};
 	bool run_exit                  = false;
+	// The archive switches as typed, a value beside those that take one, for
+	// a -run NAME that mounts the archive again; -sidecar goes on resolved.
+	std::vector<std::pair<std::string, std::optional<std::string>>> typed_switches = {};
+
+	// The host archive a mount made a drive of, when no member chain was
+	// named (its package conf is read at the mount, ada-nb2a).
+	std::optional<std_fs::path> mounted_archive = {};
 };
 
 // What a path argument is written in: the guest's code page, or a host
@@ -108,9 +115,9 @@ public:
 	// A mount line built inside the emulator (SUBST), with Run()'s guard.
 	void RunLine(std::unique_ptr<CommandLine> line, PathText path_text);
 
-	// The host path a DOS path on a local drive names: its raw bytes as the
-	// drive lists them first, then G13's code page reading; "" when neither
-	// exists.
+	// The host path a DOS path on a local or an archive drive names: its raw
+	// bytes as the drive lists them first, then G13's code page reading; ""
+	// when neither exists. On an archive drive a member is a chain path.
 	static std::string HostPathOfDosPath(const std::string& dos_path);
 
 	std::optional<MountParameters> ProcessArguments(
@@ -148,10 +155,11 @@ public:
 	                        ArchiveMount::ArchiveCache::Scratch&& scratch);
 	// The scratch of this MOUNT line, made once; false with the reason set.
 	static bool EnsureScratch(MountParameters& params, std::string* why);
-	// PROGRAM_MOUNT_ARCHIVE_UNSUPPORTED's text; the unit tests link a
-	// message stub, so they read it here.
+	// PROGRAM_MOUNT_ARCHIVE_UNSUPPORTED's English text.
 	static const char* const ArchiveUnsupportedMessage;
-	// The refusals that name a path, by message id, read by the tests too.
+	// PROGRAM_MOUNT_HELP_LONG's English text.
+	static const char* const HelpLongText;
+	// The refusals that name a path, by message id.
 	static const std::vector<std::pair<std::string, std::string>>& RefusalTexts();
 
 private:
@@ -178,6 +186,8 @@ private:
 	bool HasUnknownOptions();
 
 	void QueueRun(const MountParameters& params);
+	bool QueuePackage(const MountParameters& params);
+	bool RunOnMountedDrive(MountParameters& params);
 
 	bool ParseArguments(MountParameters& params, bool& explicit_fs,
 	                    bool& path_relative_to_last_config);

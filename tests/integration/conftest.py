@@ -2,6 +2,7 @@
 # License: GPL-2.0-or-later. Contact: dosbox-automation-project@trinity2k.net
 #
 
+import hashlib
 import os
 import secrets
 import shutil
@@ -28,6 +29,7 @@ SETTING_SECTIONS = {
     "lpt_dac": "speaker",
     "ems": "dos",
     "archive_cache_path": "dos",
+    "unimenu": "dos",
     "archive_sidecar_path": "dos",
     "archive_cache_max_size": "dos",
     "archive_cache_min_free": "dos",
@@ -186,6 +188,13 @@ class DosboxInstance:
                 pass
 
 
+def engine_home(work_dir: Path) -> Path:
+    """The engine's HOME outside work_dir and any conf folder around it: a
+    conf anchor that holds the engine's own folders opens nothing (ada-fl3c)."""
+    digest = hashlib.sha256(str(work_dir.absolute()).encode()).hexdigest()[:16]
+    return WORKSPACE / "engine-homes" / f"{work_dir.name}-{digest}"
+
+
 def start_dosbox_instance(work_dir, autoexec_lines=None, extra_sets=None,
                           conf_dir=None, allowed_image_roots=None,
                           settings=None, extra_env=None, extra_args=None):
@@ -221,7 +230,8 @@ def start_dosbox_instance(work_dir, autoexec_lines=None, extra_sets=None,
     # the build resource directory so the internal auto-mount succeeds.
     dosbox_bin = Path(DOSBOX_BIN).resolve()
     resource_dir = dosbox_bin.parent / "resources"
-    config_dir = work_dir / ".config" / "dosbox-automation"
+    home_dir = engine_home(work_dir)
+    config_dir = home_dir / ".config" / "dosbox-automation"
     config_dir.mkdir(parents=True, exist_ok=True)
     primary_conf = config_dir / "dosbox-automation.conf"
 
@@ -263,8 +273,10 @@ def start_dosbox_instance(work_dir, autoexec_lines=None, extra_sets=None,
 
     env = {
         **os.environ,
-        "HOME": str(work_dir),
-        "XDG_CONFIG_HOME": str(work_dir / ".config"),
+        "HOME": str(home_dir),
+        "XDG_CONFIG_HOME": str(home_dir / ".config"),
+        "XDG_DATA_HOME": str(home_dir / ".local" / "share"),
+        "XDG_CACHE_HOME": str(home_dir / ".cache"),
         "DOSBOX_API_TOKEN": token,
         **(extra_env or {}),
     }

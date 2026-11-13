@@ -10,8 +10,11 @@
 
 #include <cstdint>
 #include <limits>
+#include <optional>
+#include <span>
 #include <vector>
 
+#include "hardware/guest_memory.h"
 #include "http/http.h"
 
 namespace Webserver {
@@ -29,11 +32,22 @@ public:
 	void Execute() override;
 	static void Get(const httplib::Request& req, httplib::Response& res);
 
+	const std::string& Memory() const
+	{
+		return memory;
+	}
+	std::optional<PhysPt> NotMappedAt() const
+	{
+		return not_mapped_at;
+	}
+
 private:
 	// Request
 	Segment base    = {};
 	uint32_t offset = {};
 	uint32_t len    = {};
+
+	std::optional<PhysPt> not_mapped_at = {};
 
 	// Response
 	// Memory is std::string to avoid ugly casts for httplib
@@ -55,7 +69,14 @@ public:
 	void Execute() override;
 	static void Put(const httplib::Request& req, httplib::Response& res);
 
+	std::optional<PhysPt> NotMappedAt() const
+	{
+		return not_mapped_at;
+	}
+
 private:
+	std::optional<PhysPt> not_mapped_at = {};
+
 	// Request
 	Segment base     = {};
 	uint32_t offset  = {};
@@ -72,7 +93,13 @@ private:
 
 // Scan a byte buffer for little-endian matches of `value` at `width`
 // (1, 2, or 4). Returns the offsets where a match starts.
-std::vector<uint32_t> ScanBufferForValue(const std::vector<uint8_t>& buf,
+std::vector<uint32_t> ScanBufferForValue(std::span<const uint8_t> buf,
+                                         uint32_t value, int width);
+
+// The same over guest memory read from `base`, skipping the holes: a match
+// lies wholly inside a mapped run. Returns addresses.
+std::vector<uint32_t> ScanMappedForValue(std::span<const uint8_t> buf, uint32_t base,
+                                         const std::vector<GuestMemory::Range>& skipped,
                                          uint32_t value, int width);
 
 class SearchMemoryCommand : public Command {
@@ -88,6 +115,10 @@ public:
 	{
 		return matches;
 	}
+	const std::vector<GuestMemory::Range>& Skipped() const
+	{
+		return skipped;
+	}
 
 private:
 	uint32_t start = 0;
@@ -96,6 +127,8 @@ private:
 	int width      = 1;
 
 	std::vector<uint32_t> matches = {};
+
+	std::vector<GuestMemory::Range> skipped = {};
 };
 
 } // namespace Webserver

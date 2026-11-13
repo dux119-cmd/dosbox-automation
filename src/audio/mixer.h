@@ -1,6 +1,7 @@
 // SPDX-FileCopyrightText:  2020-2026 The DOSBox Staging Team
 // SPDX-FileCopyrightText:  2002-2021 The DOSBox Team
 // SPDX-License-Identifier: GPL-2.0-or-later
+// Copyright (C) 2026 dosbox-automation contributors
 
 #ifndef DOSBOX_MIXER_H
 #define DOSBOX_MIXER_H
@@ -484,6 +485,9 @@ void MIXER_CloseAudioDevice();
 // Return true if the mixer was explicitly muted by the user (as opposed to
 // auto-muted when `mute_when_inactive` is enabled).
 bool MIXER_IsManuallyMuted();
+
+// An explicit mute (hotkey, API, Lua) that regaining focus does not lift.
+void MIXER_SetManualMute(const bool muted);
 
 CrossfeedPreset MIXER_GetCrossfeedPreset();
 void MIXER_SetCrossfeedPreset(const CrossfeedPreset new_preset);

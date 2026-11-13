@@ -45,6 +45,7 @@ target_sources(dosboxcommon PRIVATE
   floppy_image.cpp
   archive/archive_helper_client.cpp
   archive/chain_resolver.cpp
+  archive/package_autoexec.cpp
   programs.cpp
 
   programs/append.cpp
@@ -59,6 +60,7 @@ target_sources(dosboxcommon PRIVATE
   programs/help.cpp
   programs/join.cpp
   programs/keyb.cpp
+  programs/label.cpp
   programs/loadfix.cpp
   programs/loadrom.cpp
   programs/ls.cpp
@@ -73,6 +75,8 @@ target_sources(dosboxcommon PRIVATE
   programs/archive_chooser.cpp
   programs/menu_session.cpp
   programs/mount_archive.cpp
+  programs/package_start.cpp
+  programs/package_runtime.cpp
   programs/archive_images.cpp
   programs/mount_common.cpp
   programs/mount_policy.cpp

@@ -1,6 +1,7 @@
 // SPDX-FileCopyrightText:  2020-2026 The DOSBox Staging Team
 // SPDX-FileCopyrightText:  2002-2021 The DOSBox Team
 // SPDX-License-Identifier: GPL-2.0-or-later
+// Copyright (C) 2026 dosbox-automation contributors
 
 #include "mixer.h"
 
@@ -3092,6 +3093,19 @@ bool MIXER_IsManuallyMuted()
 	return mixer.is_manually_muted;
 }
 
+void MIXER_SetManualMute(const bool muted)
+{
+	if (mixer.state == MixerState::NoSound) {
+		return;
+	}
+	if (muted) {
+		MIXER_Mute();
+	} else {
+		MIXER_Unmute();
+	}
+	mixer.is_manually_muted = muted;
+}
+
 // Toggle the mixer on/off when a 'true' bool is passed in.
 static void handle_toggle_mute(const bool was_pressed)
 {
@@ -3106,15 +3120,9 @@ static void handle_toggle_mute(const bool was_pressed)
 		LOG_WARNING("MIXER: Mute requested, but sound is disabled ('nosound' mode)");
 		break;
 
-	case MixerState::Muted:
-		MIXER_Unmute();
-		mixer.is_manually_muted = false;
-		break;
+	case MixerState::Muted: MIXER_SetManualMute(false); break;
 
-	case MixerState::On:
-		MIXER_Mute();
-		mixer.is_manually_muted = true;
-		break;
+	case MixerState::On: MIXER_SetManualMute(true); break;
 
 	default: break;
 	};

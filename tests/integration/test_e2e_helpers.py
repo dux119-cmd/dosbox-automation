@@ -8,6 +8,8 @@ import datetime
 import functools
 import http.server
 import os
+import shutil
+import subprocess  # nosec B404
 import threading
 
 import pytest
@@ -17,9 +19,12 @@ from e2e_helpers import (
     PromptStep,
     archive_settings,
     build_autoexec,
+    collect_provenance,
     conf_section,
     download_disk_images,
+    export_frames,
     generate_install_script,
+    hash_frame,
     image_path,
     media_present,
     resolve_cpu_cycles,
@@ -379,3 +384,32 @@ def test_conf_section_writes_settings_and_nothing_when_empty():
                                 "archive_sequential": "cache"}) == (
         "[dos]\nkeyboard_layout = us\narchive_sequential = cache\n\n")
     assert conf_section("dos", {}) == ""
+
+
+# The lossless recording gives the frames back byte for byte, which the
+# .hashes file proves.
+# Indexed modes record as 8-bit ZMBV, which FFV1 cannot store as such.
+@pytest.mark.skipif(shutil.which("ffmpeg") is None, reason="needs ffmpeg")
+@pytest.mark.parametrize("pix_fmt", ["bgr0", "pal8"])
+def test_provenance_keeps_the_hashes_and_not_the_frames(tmp_path, pix_fmt):
+    capture = tmp_path / "work" / "capture"
+    capture.mkdir(parents=True)
+    subprocess.run(["ffmpeg", "-v", "error", "-f", "lavfi", "-i",
+                    "testsrc=size=320x200:rate=10:duration=0.5",
+                    "-pix_fmt", pix_fmt,
+                    "-c:v", "zmbv", str(capture / "video0001.avi")],
+                   check=True)  # nosec B603 B607 - ffmpeg on our own input
+    game = tmp_path / "game"
+    collect_provenance(tmp_path / "work", game, "slug")
+
+    prov = game / "provenance"
+    assert not [p for p in prov.iterdir() if p.name.endswith("-frames")]
+    hashes_file = next(prov.glob("slug-*.hashes"))
+    golden = dict(reversed(line.split()) for line in
+                  hashes_file.read_text(encoding="utf-8").splitlines() if line.strip())
+    assert len(golden) == 5
+
+    again = tmp_path / "again"
+    lossless = next(prov.glob("slug-*-install-lossless.mkv"))
+    frames = export_frames(lossless, again)
+    assert {f.name: hash_frame(f) for f in frames} == golden

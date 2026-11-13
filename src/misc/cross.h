@@ -100,6 +100,8 @@ void init_config_dir();
 
 std_fs::path get_config_dir();
 
+bool is_portable_layout();
+
 // The platform cache directory for this application (archive mount
 // design D14); not created here. XDG_CACHE_HOME overrides it on every
 // platform but macOS, as XDG_CONFIG_HOME does for the config directory.

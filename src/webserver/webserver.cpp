@@ -21,7 +21,9 @@
 
 #include "lua/lua_bridge_commands.h"
 
+#include "dos/archive/archive_toml.h"
 #include "dos/programs/mount_policy.h"
+#include "dos/programs/package_start.h"
 #include "gui/mapper.h"
 #include "gui/osd/osd.h"
 #include "gui/osd/osd_port.h"
@@ -55,6 +57,7 @@
 #include "misc/cross.h"
 #include "misc/logging.h"
 #include "misc/support.h"
+#include "utils/string_utils.h"
 
 using json = nlohmann::json;
 
@@ -69,8 +72,7 @@ void send_json(httplib::Response& res, const nlohmann::json& j)
 	                "application/json");
 }
 
-static void error_handler(const httplib::Request&, httplib::Response& res,
-                          std::exception_ptr ep)
+void ErrorResponse(std::exception_ptr ep, httplib::Response& res)
 {
 	json j;
 	std::string msg;
@@ -80,6 +82,16 @@ static void error_handler(const httplib::Request&, httplib::Response& res,
 		if (ep) {
 			std::rethrow_exception(ep);
 		}
+	} catch (const BridgeBusy& busy) {
+		augra::log_debug("webserver", "busy: %s", busy.what());
+		msg        = "Emulation busy, retry later";
+		res.status = httplib::StatusCode::ServiceUnavailable_503;
+		res.set_header("Retry-After", "1");
+	} catch (const GuestPageNotMapped& unmapped) {
+		msg = format_str("Guest page tables do not map address 0x%x",
+		                 unmapped.address);
+		j["address"] = unmapped.address;
+		res.status   = httplib::StatusCode::Conflict_409;
 	} catch (const std::invalid_argument&) {
 		msg        = "Invalid request parameter";
 		res.status = httplib::StatusCode::BadRequest_400;
@@ -97,6 +109,12 @@ static void error_handler(const httplib::Request&, httplib::Response& res,
 
 	j["error"] = msg;
 	send_json(res, j);
+}
+
+static void error_handler(const httplib::Request&, httplib::Response& res,
+                          std::exception_ptr ep)
+{
+	ErrorResponse(ep, res);
 }
 
 bool IsPublicDocPath(const std::string& method, const std::string& path)
@@ -261,7 +279,11 @@ static std::string generate_api_token()
 	return token;
 }
 
+// Written by the server thread, removed at shutdown from the main thread.
+static std::mutex token_file_mutex           = {};
 static std::filesystem::path token_file_path = {};
+static std::string token_file_token          = {};
+static bool token_file_closed                = false;
 
 static std::filesystem::path get_token_file_dir()
 {
@@ -275,6 +297,11 @@ static bool write_token_file(const std::string& token)
 	const auto dir  = get_token_file_dir();
 	const auto path = dir / "api_token";
 
+	const std::lock_guard lock(token_file_mutex);
+	if (token_file_closed) {
+		return false;
+	}
+
 	std::error_code ec;
 	fs::create_directories(dir, ec);
 	if (ec) {
@@ -285,51 +312,37 @@ static bool write_token_file(const std::string& token)
 		return false;
 	}
 
-	const auto tmp = dir / "api_token.tmp";
-
-	{
-		auto out = std::ofstream(tmp, std::ios::binary | std::ios::trunc);
-		if (!out.is_open()) {
-			augra::log_warn("webserver",
-			                "cannot write token file '%s'",
-			                tmp.string().c_str());
-			return false;
-		}
-		out << token;
-	}
-
-#if !defined(WIN32)
-	fs::permissions(tmp, fs::perms::owner_read | fs::perms::owner_write, ec);
-	if (ec) {
+	// Created 0600 under a name of its own, then renamed into place: never
+	// readable by others, never shared with a second engine's write.
+	std::string error = {};
+	if (!ArchiveToml::WriteTextAtomically(path, token, &error)) {
 		augra::log_warn("webserver",
-		                "cannot set permissions on '%s'",
-		                tmp.string().c_str());
-		fs::remove(tmp, ec);
-		return false;
-	}
-#endif
-
-	fs::rename(tmp, path, ec);
-	if (ec) {
-		augra::log_warn("webserver",
-		                "cannot rename token file: %s",
-		                ec.message().c_str());
-		fs::remove(tmp, ec);
+		                "cannot write token file: %s",
+		                error.c_str());
 		return false;
 	}
 
-	token_file_path = path;
+	token_file_path  = path;
+	token_file_token = token;
 	return true;
 }
 
 static void remove_token_file()
 {
+	const std::lock_guard lock(token_file_mutex);
+	token_file_closed = true;
 	if (token_file_path.empty()) {
 		return;
 	}
-	std::error_code ec;
-	std::filesystem::remove(token_file_path, ec);
+	// Another engine on the same config folder may have written its token
+	// since; that file is not ours to remove.
+	const auto content = ArchiveToml::ReadTextFile(token_file_path, nullptr);
+	if (content && *content == token_file_token) {
+		std::error_code ec;
+		std::filesystem::remove(token_file_path, ec);
+	}
 	token_file_path.clear();
+	token_file_token.clear();
 }
 
 static std::string extract_bearer_token(const std::string& auth_header)
@@ -556,24 +569,6 @@ static void run(const std::string addr, const int port,
 		           send_json(res, j);
 	           });
 
-	// Channel B: write the auto-generated token to a file so launchers
-	// can read it without scraping stderr.
-	if (use_token_file && !token_from_env) {
-		if (write_token_file(api_token)) {
-			augra::log_info("webserver",
-			                "token written to %s",
-			                token_file_path.string().c_str());
-		} else {
-			augra::log_info("webserver",
-			                "API token: %.8s...",
-			                api_token.c_str());
-		}
-	} else if (token_from_env) {
-		augra::log_info("webserver", "using API token from DOSBOX_API_TOKEN");
-	} else {
-		augra::log_info("webserver", "API token: %.8s...", api_token.c_str());
-	}
-
 	augra::log_info("webserver",
 	                "starting HTTP REST API on http://%s:%d",
 	                addr.c_str(),
@@ -595,11 +590,40 @@ static void run(const std::string addr, const int port,
 #endif
 	});
 
-	auto ok = server.listen(addr, port);
-	if (!ok) {
+	// The port first: an engine that cannot have it leaves the token file
+	// of the engine that has it alone.
+	if (!server.bind_to_port(addr, port)) {
 		augra::log_warn("webserver",
 		                "failed to bind to %s:%d, another instance is "
 		                "probably using the port; the API is off",
+		                addr.c_str(),
+		                port);
+		clear_endpoint();
+		return;
+	}
+
+	// Channel B: write the auto-generated token to a file so launchers
+	// can read it without scraping stderr.
+	if (use_token_file && !token_from_env) {
+		if (write_token_file(api_token)) {
+			augra::log_info(
+			        "webserver",
+			        "token written to %s",
+			        (get_token_file_dir() / "api_token").string().c_str());
+		} else {
+			augra::log_info("webserver",
+			                "API token: %.8s...",
+			                api_token.c_str());
+		}
+	} else if (token_from_env) {
+		augra::log_info("webserver", "using API token from DOSBOX_API_TOKEN");
+	} else {
+		augra::log_info("webserver", "API token: %.8s...", api_token.c_str());
+	}
+
+	if (!server.listen_after_bind()) {
+		augra::log_warn("webserver",
+		                "the API on %s:%d stopped before it served",
 		                addr.c_str(),
 		                port);
 		clear_endpoint();
@@ -639,10 +663,12 @@ static void init_config_settings(SectionProp& section)
 	auto token_file = section.AddBool("webserver_token_file", OnlyAtStart, false);
 	token_file->SetHelp(
 	        "Write the API token to a file instead of printing it to the log.\n"
-	        "The file is written to the webserver config directory with restricted\n"
-	        "permissions (0600) and removed on clean shutdown. Launchers and tools\n"
-	        "can read the token from this file instead of scraping log output.\n"
-	        "Has no effect when DOSBOX_API_TOKEN is set via environment variable.");
+	        "The file goes into the webserver config directory, readable by its owner\n"
+	        "only (on Windows the folder's access rights apply), once the API holds\n"
+	        "its port, and is removed at exit while it still holds this engine's\n"
+	        "token. Launchers and tools can read the token from this file instead of\n"
+	        "scraping log output. Has no effect when DOSBOX_API_TOKEN is set via\n"
+	        "environment variable.");
 
 	auto tool_token = section.AddString("webserver_tool_token", OnlyAtStart, "embed");
 	tool_token->SetValues({"embed", "prompt"});
@@ -714,7 +740,11 @@ void WEBSERVER_Init()
 	                  "workbench",
 	                  "Workbench");
 
-	MountPolicy::InitPolicyConfig(get_primary_config_path());
+	const auto package = control->cmdline
+	                           ? PackageStart::FindCommandLinePackage(*control->cmdline)
+	                           : std::nullopt;
+	MountPolicy::InitPolicyConfig(get_primary_config_path(),
+	                              package ? package->path : std::filesystem::path{});
 
 	auto section = get_section("webserver");
 

@@ -20,7 +20,7 @@ namespace Webserver {
 
 void CaptureStartCommand::Execute()
 {
-	CAPTURE_StartVideoCapture(mode);
+	started = CAPTURE_StartVideoCapture(mode);
 }
 
 void CaptureStartCommand::Post(const httplib::Request& req, httplib::Response& res)
@@ -51,6 +51,14 @@ void CaptureStartCommand::Post(const httplib::Request& req, httplib::Response& r
 		res.status = 500;
 		json err;
 		err["error"] = cmd.error;
+		send_json(res, err);
+		return;
+	}
+
+	if (!cmd.started) {
+		res.status = 409;
+		json err;
+		err["error"] = "Already capturing video";
 		send_json(res, err);
 		return;
 	}
@@ -131,7 +139,19 @@ void CaptureStatusCommand::Get(const httplib::Request&, httplib::Response& res)
 
 void AudioCaptureStartCommand::Execute()
 {
-	CAPTURE_StartAudioCapture(output_path);
+	if (output_path.empty()) {
+		started = CAPTURE_StartAudioCapture();
+		return;
+	}
+	auto file = std::string();
+	switch (CAPTURE_StartAudioCaptureAt(output_path, file)) {
+	case AudioCaptureStart::Started:
+		started     = true;
+		output_path = std::move(file);
+		break;
+	case AudioCaptureStart::AlreadyCapturing: break;
+	case AudioCaptureStart::PathRefused: path_refused = true; break;
+	}
 }
 
 void AudioCaptureStartCommand::Post(const httplib::Request& req, httplib::Response& res)
@@ -143,25 +163,28 @@ void AudioCaptureStartCommand::Post(const httplib::Request& req, httplib::Respon
 		cmd.output_path = j.value("path", "");
 	}
 
-	if (!cmd.output_path.empty()) {
-		std::error_code ec;
-		const auto parent = std_fs::canonical(
-			std_fs::path(cmd.output_path).parent_path(), ec);
-		if (ec || MountPolicy::IsUnderSystemPath(parent)) {
-			res.status = 403;
-			json err;
-			err["error"] = "output path rejected by system path policy";
-			send_json(res, err);
-			return;
-		}
-	}
-
 	cmd.WaitForCompletion(1000);
 
 	if (!cmd.error.empty()) {
 		res.status = 500;
 		json err;
 		err["error"] = cmd.error;
+		send_json(res, err);
+		return;
+	}
+
+	if (cmd.path_refused) {
+		res.status = 403;
+		json err;
+		err["error"] = "path must name a new file in the capture folder";
+		send_json(res, err);
+		return;
+	}
+
+	if (!cmd.started) {
+		res.status = 409;
+		json err;
+		err["error"] = "Already capturing audio";
 		send_json(res, err);
 		return;
 	}

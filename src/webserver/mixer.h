@@ -46,12 +46,16 @@ class MixerMuteCommand : public Command {
 public:
 	void Execute() override;
 	static void Post(const httplib::Request& req, httplib::Response& res);
+
+	bool muted = false;
 };
 
 class MixerUnmuteCommand : public Command {
 public:
 	void Execute() override;
 	static void Post(const httplib::Request& req, httplib::Response& res);
+
+	bool muted = false;
 };
 
 class MixerSetChannelVolumeCommand : public Command {

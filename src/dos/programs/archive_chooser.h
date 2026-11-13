@@ -29,9 +29,14 @@ struct Menu {
 	std::optional<size_t> autostart = {};
 };
 
+// The most directory entries one scan reads; the menu port runs it on the
+// emulation thread.
+inline constexpr size_t MaxScanEntries = 8192;
+
 struct ProgramScan {
 	std::vector<Entry> entries = {};
 	bool has_dosbox_bat        = false;
+	size_t entries_read        = 0;
 };
 
 // Programs at the root and one folder level, in menu order and capped.

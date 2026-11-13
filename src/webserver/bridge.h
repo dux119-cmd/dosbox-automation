@@ -8,9 +8,18 @@
 #include <chrono>
 #include <condition_variable>
 #include <mutex>
+#include <stdexcept>
 #include <vector>
 
 namespace Webserver {
+
+// The emulation thread did not take the command in time (a long MOUNT, a
+// device init). The command was taken off the queue unrun, so a client may
+// send it again (ada-n0vh).
+class BridgeBusy : public std::runtime_error {
+public:
+	using std::runtime_error::runtime_error;
+};
 
 class Command {
 public:

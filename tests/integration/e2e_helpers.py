@@ -15,6 +15,8 @@ import urllib.request
 from dataclasses import dataclass, field
 from pathlib import Path, PurePosixPath
 
+from conftest import engine_home
+
 try:
     import tomllib
 except ImportError:
@@ -406,6 +408,8 @@ def export_frames(video_path: Path, output_dir: Path,
                   timestamps: list[float] | None = None) -> list[Path]:
     """Extract frames from a ZMBV AVI or MKV using ffmpeg."""
     output_dir.mkdir(parents=True, exist_ok=True)
+    # One pixel format for both: 8-bit ZMBV decodes as pal8, FFV1 has none.
+    rgb = ["-pix_fmt", "rgb24"]
 
     if timestamps:
         frames = []
@@ -415,6 +419,7 @@ def export_frames(video_path: Path, output_dir: Path,
                 "ffmpeg", "-y", "-i", str(video_path),
                 "-ss", f"{ts:.3f}",
                 "-frames:v", "1",
+                *rgb,
                 str(out),
             ], capture_output=True, check=True)
             frames.append(out)
@@ -423,6 +428,7 @@ def export_frames(video_path: Path, output_dir: Path,
         pattern = output_dir / "frame_%04d.png"
         subprocess.run([
             "ffmpeg", "-y", "-i", str(video_path),
+            *rgb,
             str(pattern),
         ], capture_output=True, check=True)
         return sorted(output_dir.glob("frame_*.png"))
@@ -650,21 +656,22 @@ def collect_provenance(work_dir: Path, game_dir: Path, slug: str):
             except subprocess.CalledProcessError as e:
                 print(f"  x264 transcode failed: {e}")
 
-            # Export frames and golden hashes (from clean capture).
-            frames_dir = provenance_dir / f"{base}-frames"
+            # Golden hashes from the clean capture. The frames are not kept:
+            # the lossless MKV gives them back byte for byte.
             try:
-                frames = export_frames(source_avi, frames_dir)
-                if frames:
-                    hashes = {f.name: hash_frame(f) for f in frames}
-                    save_golden_hashes(
-                        provenance_dir / f"{base}.hashes", hashes
-                    )
-            except subprocess.CalledProcessError:
-                pass
+                with tempfile.TemporaryDirectory(prefix="frames-",
+                                                 dir=work_dir) as frames_dir:
+                    frames = export_frames(source_avi, Path(frames_dir))
+                    if frames:
+                        hashes = {f.name: hash_frame(f) for f in frames}
+                        save_golden_hashes(
+                            provenance_dir / f"{base}.hashes", hashes
+                        )
+            except subprocess.CalledProcessError as e:
+                print(f"  Frame hashes failed: {e}")
 
-    # Copy Lua debug log (lives under the config dir, which uses
-    # work_dir as HOME).
-    lua_log_dir = work_dir / ".config" / "dosbox-automation" / "logs"
+    # Copy Lua debug log (lives under the config dir in the engine's home).
+    lua_log_dir = engine_home(work_dir) / ".config" / "dosbox-automation" / "logs"
     if lua_log_dir.exists():
         for lua_log in sorted(lua_log_dir.glob("lua-debug-*.log")):
             dest = provenance_dir / f"{base}-lua.log"
@@ -729,8 +736,11 @@ Each run produces a timestamped set of files:
 - `{slug}-YYYYMMDD-HHMM-lua.log` - Lua automation debug log (frame + timecode)
 - `{slug}-YYYYMMDD-HHMM-dosbox.log` - DOSBox engine stderr output
 - `{slug}-YYYYMMDD-HHMM-stats.json` - run statistics (duration, files, prompts)
-- `{slug}-YYYYMMDD-HHMM-frames/` - extracted video frames (PNG)
-- `{slug}-YYYYMMDD-HHMM.hashes` - SHA-256 hashes of extracted frames
+- `{slug}-YYYYMMDD-HHMM.hashes` - SHA-256 hashes of the video's frames as RGB PNG
+
+The frames themselves are not kept. `ffmpeg -i <run>-install-lossless.mkv
+-pix_fmt rgb24 frame_%04d.png` gives them back, and they match the `.hashes`
+file byte for byte.
 
 ## Required tools
 

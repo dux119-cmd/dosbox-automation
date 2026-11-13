@@ -61,7 +61,7 @@ if [ -z "$version" ]; then
     exit 1
 fi
 
-# The cache holds the plain project version; the -daN release suffix is a
+# The cache holds the plain project version; a pre-release suffix (-pre1) is a
 # non-cache variable, so it has to come from the source CMakeLists.
 source_dir=$(sed -n 's/^CMAKE_HOME_DIRECTORY:INTERNAL=//p' "$build_dir/CMakeCache.txt")
 if [ ! -f "$source_dir/CMakeLists.txt" ]; then
@@ -163,6 +163,10 @@ WEOF
 chmod 755 "$wrapper"
 
 cp --preserve=timestamps "$source_dir/scripts/clients/cheat-workbench.sh" "$stage/$name/"
+# The agent guide names dosboxctl and docs/agents/ relative to itself.
+cp --preserve=timestamps "$source_dir/scripts/clients/dosboxctl" "$source_dir/AGENTS.md" "$stage/$name/"
+mkdir -p "$stage/$name/docs"
+cp -R --preserve=timestamps "$source_dir/docs/agents" "$stage/$name/docs/"
 if [ -f "$build_dir/build-info.txt" ]; then
     cp --preserve=timestamps "$build_dir/build-info.txt" "$stage/$name/"
 fi

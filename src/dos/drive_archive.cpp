@@ -169,6 +169,7 @@ struct ArchiveDrive::Impl {
 	Options options                            = {};
 	std::string label                          = {};
 	Allocation allocation                      = {};
+	std::string source_path                    = {};
 
 	DriveSearchSlots<SearchCursor, MAX_OPENDIRS> searches = {};
 
@@ -283,6 +284,7 @@ struct ArchiveDrive::Impl {
 		// listed only when the search asks for that class.
 		FatAttributeFlags found = {};
 		found.directory         = node.is_dir;
+		found.hidden            = node.is_hidden;
 		FatAttributeFlags mask  = {};
 		mask.directory          = true;
 		mask.hidden             = true;
@@ -302,6 +304,7 @@ struct ArchiveDrive::Impl {
 		out.time           = node.dos_time;
 		out.attr           = FatAttributeFlags::ReadOnly;
 		out.attr.directory = node.is_dir;
+		out.attr.hidden    = node.is_hidden;
 		return out;
 	}
 
@@ -354,6 +357,7 @@ struct ArchiveDrive::Impl {
 		           wild_file_cmp(label.c_str(), pattern)) {
 			produced = true;
 		}
+		produced = produced && !label.empty();
 		if (produced) {
 			out      = {};
 			out.name = label;
@@ -486,7 +490,15 @@ std::string ArchiveDrive::FoldLabel(const std::string_view label)
 			out.push_back('_');
 		}
 	}
-	return out.empty() ? "ARCHIVE" : out;
+	if (out.empty()) {
+		return "ARCHIVE";
+	}
+	// Labels are kept in the 8.3 form DOS searches hand back
+	constexpr size_t BaseChars = 8;
+	if (out.size() > BaseChars) {
+		out.insert(BaseChars, 1, '.');
+	}
+	return out;
 }
 
 ArchiveDrive::Allocation ArchiveDrive::ComputeAllocation(const int64_t total_bytes)
@@ -553,6 +565,7 @@ ArchiveDrive::CreateResult ArchiveDrive::Create(
 	drive->impl->label   = FoldLabel(label);
 	drive->impl->allocation = ComputeAllocation(drive->impl->tree->TotalBytes());
 	drive->type = DosDriveType::Archive;
+	drive->impl->source_path = std::string(info_text);
 	safe_strcpy(drive->info, std::string(info_text).c_str());
 	result.drive = std::move(drive);
 	return result;
@@ -751,6 +764,7 @@ bool ArchiveDrive::GetFileAttr(const char* name, FatAttributeFlags* attr)
 	}
 	attr->read_only = true;
 	attr->directory = node->is_dir;
+	attr->hidden    = node->is_hidden;
 	return true;
 }
 
@@ -811,6 +825,26 @@ const char* ArchiveDrive::GetLabel()
 	return impl->label.c_str();
 }
 
+// The archive stays untouched; the label lives until unmount (ada-9j99).
+bool ArchiveDrive::SetVolumeLabel(const std::string& name)
+{
+	if (!IsDosLabelForm(name)) {
+		return false;
+	}
+	impl->label.clear();
+	for (const auto c : name) {
+		impl->label.push_back(
+		        static_cast<char>(toupper(static_cast<unsigned char>(c))));
+	}
+	return true;
+}
+
+bool ArchiveDrive::DeleteVolumeLabel()
+{
+	impl->label.clear();
+	return true;
+}
+
 bool ArchiveDrive::IsReady()
 {
 	return impl->EnsureReady();
@@ -848,6 +882,11 @@ const ArchiveSource& ArchiveDrive::Source() const
 const ArchiveTree& ArchiveDrive::Tree() const
 {
 	return *impl->tree;
+}
+
+const std::string& ArchiveDrive::SourcePath() const
+{
+	return impl->source_path;
 }
 
 int64_t ArchiveDrive::RetainedMemoryBytes() const

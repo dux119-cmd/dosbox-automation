@@ -114,6 +114,18 @@ TEST_F(AutoexecArchiveTest, ArchiveLinesMountCAndLeaveTheProgramToMount)
 	                                 "@C:")));
 }
 
+// A package that stops at the prompt: C: mounted without -run, and UniMenu
+// after it when [dos] unimenu is on.
+TEST_F(AutoexecArchiveTest, MountLinesMountCWithoutRunAndTheMenuLineStartsUniMenu)
+{
+	EXPECT_THAT(AutoexecArchive::MountLines("/my games/100% doom.zip"),
+	            Optional(ElementsAre("@Z:\\MOUNT.COM -u C >NUL",
+	                                 "@Z:\\MOUNT.COM C \"/my games/100%% doom.zip\"",
+	                                 "@C:")));
+	EXPECT_EQ(AutoexecArchive::MountLines("/games/a\"b.zip"), std::nullopt);
+	EXPECT_EQ(AutoexecArchive::MenuLine(), "@Y:\\DOS\\UNIMENU.EXE");
+}
+
 // AUTOEXEC.BAT goes through the batch expansion, where a lone % ends the
 // line and %1 or %PATH% are replaced.
 TEST_F(AutoexecArchiveTest, PercentSignsSurviveTheBatchExpansion)
@@ -153,3 +165,12 @@ TEST_F(AutoexecArchiveTest, APathThatCannotBeQuotedIsRefused)
 }
 
 } // namespace
+
+// --run on the C: a package mounted; AUTOEXEC.BAT expands '%'.
+TEST(AutoexecArchive, RunOnMountedLineDoublesPercent)
+{
+	EXPECT_EQ(AutoexecArchive::RunOnMountedLine("GAME.EXE"),
+	          "@Z:\\MOUNT.COM C -run GAME.EXE -exit");
+	EXPECT_EQ(AutoexecArchive::RunOnMountedLine("100%.EXE"),
+	          "@Z:\\MOUNT.COM C -run 100%%.EXE -exit");
+}

@@ -11,7 +11,10 @@ is removed on clean shutdown.
 """
 
 import os
+import secrets
 import stat
+import subprocess
+import time
 from pathlib import Path
 
 import pytest
@@ -19,19 +22,39 @@ import requests
 from conftest import find_free_port
 
 
-def start_with_token_file(work_dir, use_env_token=False):
+def token_file_env(work_dir):
+    return {
+        **os.environ,
+        "SDL_VIDEODRIVER": "offscreen",
+        "SDL_AUDIODRIVER": "dummy",
+        "HOME": str(work_dir),
+        "XDG_CONFIG_HOME": str(work_dir / ".config"),
+    }
+
+
+def token_file_cmd(port):
+    from conftest import DOSBOX_BIN
+    return [
+        DOSBOX_BIN,
+        "--noprimaryconf",
+        "--nolocalconf",
+        "--set", "webserver_enabled=true",
+        "--set", f"webserver_port={port}",
+        "--set", "webserver_token_file=true",
+    ]
+
+
+def start_with_token_file(work_dir, use_env_token=False, port=None):
     """Start DOSBox with webserver_token_file enabled.
 
     When use_env_token is False, no DOSBOX_API_TOKEN is set, so the
     server auto-generates a token and writes it to the file.
     """
-    import secrets
-    import subprocess
-
     from conftest import DOSBOX_BIN, DosboxInstance, StderrCapture
     from dosbox_client import DosboxClient
 
-    port = find_free_port()
+    if port is None:
+        port = find_free_port()
     work_dir.mkdir(parents=True, exist_ok=True)
 
     # Write primary config
@@ -44,13 +67,7 @@ def start_with_token_file(work_dir, use_env_token=False):
         f"[webserver]\nmount_allowed_bases = {resource_dir}\n"
     )
 
-    env = {
-        **os.environ,
-        "SDL_VIDEODRIVER": "offscreen",
-        "SDL_AUDIODRIVER": "dummy",
-        "HOME": str(work_dir),
-        "XDG_CONFIG_HOME": str(work_dir / ".config"),
-    }
+    env = token_file_env(work_dir)
 
     if use_env_token:
         token = secrets.token_hex(32)
@@ -59,17 +76,8 @@ def start_with_token_file(work_dir, use_env_token=False):
         env.pop("DOSBOX_API_TOKEN", None)
         token = None
 
-    cmd = [
-        DOSBOX_BIN,
-        "--noprimaryconf",
-        "--nolocalconf",
-        "--set", "webserver_enabled=true",
-        "--set", f"webserver_port={port}",
-        "--set", "webserver_token_file=true",
-    ]
-
     proc = subprocess.Popen(
-        cmd, env=env,
+        token_file_cmd(port), env=env,
         stdout=subprocess.DEVNULL,
         stderr=subprocess.PIPE,
         cwd=str(work_dir),
@@ -202,3 +210,59 @@ def test_no_token_file_with_env_var(tmp_path):
         )
     finally:
         inst.shutdown()
+
+
+# -----------------------------------------------------------------------
+# A second engine on the same port and a file another engine wrote
+# -----------------------------------------------------------------------
+
+def wait_for_text(path, needle, timeout):
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        if path.exists() and needle in path.read_text(encoding="utf-8", errors="replace"):
+            return
+        time.sleep(0.2)
+    text = path.read_text(encoding="utf-8", errors="replace") if path.exists() else ""
+    raise AssertionError(f"{needle!r} not in {path.name} after {timeout}s:\n{text[-2000:]}")
+
+
+def test_second_engine_on_the_same_port_leaves_the_token_file_alone(tmp_path):
+    """An engine that cannot bind neither replaces nor removes the token
+    file of the engine that holds the port."""
+    work_dir = tmp_path / "two-engines"
+    inst, token = start_with_token_file(work_dir)
+    token_path = work_dir / ".config" / "dosbox-automation" / "webserver" / "api_token"
+    port = int(inst.client.base_url.rsplit(":", 1)[1])
+
+    log = work_dir / "second.log"
+    with log.open("wb") as out:
+        second = subprocess.Popen(token_file_cmd(port), env=token_file_env(work_dir),
+                                  stdout=out, stderr=subprocess.STDOUT, cwd=str(work_dir))
+    try:
+        wait_for_text(log, "failed to bind", timeout=30)
+        assert token_path.read_text(encoding="utf-8") == token
+
+        second.terminate()
+        second.wait(timeout=30)
+        assert "| atexit" in log.read_text(encoding="utf-8", errors="replace"), "no clean exit"
+        assert token_path.read_text(encoding="utf-8") == token
+        assert inst.client.status().status_code == 200
+    finally:
+        if second.poll() is None:
+            second.kill()
+            second.wait(timeout=10)
+        inst.shutdown()
+
+
+def test_shutdown_leaves_a_token_file_another_engine_wrote(tmp_path):
+    """The file is removed at exit only while it still holds this
+    engine's token."""
+    work_dir = tmp_path / "replaced"
+    inst, _ = start_with_token_file(work_dir)
+    token_path = work_dir / ".config" / "dosbox-automation" / "webserver" / "api_token"
+
+    other = secrets.token_hex(32)
+    token_path.write_text(other, encoding="utf-8")
+    inst.shutdown()
+
+    assert token_path.read_text(encoding="utf-8") == other

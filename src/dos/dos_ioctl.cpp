@@ -1,10 +1,12 @@
 // SPDX-FileCopyrightText:  2021-2026 The DOSBox Staging Team
 // SPDX-FileCopyrightText:  2002-2021 The DOSBox Team
 // SPDX-License-Identifier: GPL-2.0-or-later
+// Copyright (C) 2026 dosbox-automation contributors
 
 #include "cpu/callback.h"
 #include "cpu/registers.h"
 #include "dos.h"
+#include "dos/drives.h"
 #include "dosbox.h"
 #include "hardware/memory.h"
 #include <cstring>
@@ -193,26 +195,16 @@ bool DOS_IOCTL(void) {
 				break;
 			case 0x66:	/* Get volume serial number */
 				{			
-					char const* bufin=Drives[drive]->GetLabel();
-					char buffer[11];memset(buffer,' ',11);
-
-					char const* find_ext=strchr(bufin,'.');
-					if (find_ext) {
-						auto size=(Bitu)(find_ext-bufin);
-						if (size>8) size=8;
-						memcpy(buffer,bufin,size);
-						find_ext++;
-						memcpy(buffer+8,find_ext,(strlen(find_ext)>3) ? 3 : strlen(find_ext)); 
-					} else {
-						memcpy(buffer,bufin,(strlen(bufin) > 8) ? 8 : strlen(bufin));
-					}
+					const auto buffer = LabelAsRootEntryName(
+					        Drives[drive]->GetLabel());
 			
 					char buf2[8]={ 'F','A','T','1','6',' ',' ',' '};
 					if(drive<2) buf2[4] = '2'; //FAT12 for floppies
 
 					//mem_writew(ptr+0,0);			//Info level (call value)
-					mem_writed(ptr+2,0x1234);		//Serial number
-					MEM_BlockWrite(ptr+6,buffer,11);//volumename
+					// Media without a FORMAT serial keep the old fixed 1234h (ada-9j99)
+					mem_writed(ptr + 2, Drives[drive]->GetSerial().value_or(0x1234));
+					MEM_BlockWrite(ptr + 6, buffer.data(), 11);
 					MEM_BlockWrite(ptr+0x11,buf2,8);//filesystem
 				}
 				break;

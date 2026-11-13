@@ -7,6 +7,7 @@
 
 #include "dos/dos_names.h"
 
+#include <algorithm>
 #include <cstring>
 #include <string_view>
 
@@ -33,6 +34,21 @@ std::string To_Label(const char* name) {
 	label.resize(11); // collapse remainder to (at-most) 11 chars
 	upcase(label);
 	return label;
+}
+
+std::string LabelAsRootEntryName(const std::string_view label)
+{
+	constexpr size_t BaseChars = 8;
+	constexpr size_t ExtChars  = 3;
+	const auto dot  = label.find('.');
+	const auto base = label.substr(0, std::min(dot, BaseChars));
+	const auto ext  = dot == std::string_view::npos
+	                        ? std::string_view()
+	                        : label.substr(dot + 1, ExtChars);
+	auto entry = std::string(BaseChars + ExtChars, ' ');
+	entry.replace(0, base.size(), base);
+	entry.replace(BaseChars, ext.size(), ext);
+	return entry;
 }
 
 void Set_Label(const char* const input, char* const output, bool cdrom)
@@ -128,6 +144,40 @@ DOS_Drive::DOS_Drive()
 void DOS_Drive::SetDir(const char *path)
 {
 	safe_strcpy(curdir, path);
+}
+
+// Folders and archives keep a label in memory until unmount, as MOUNT
+// -label does (ada-9j99).
+bool DOS_Drive::SetVolumeLabel(const std::string& name)
+{
+	if (!IsDosLabelForm(name)) {
+		return false;
+	}
+	dirCache.ReplaceLabel(name.c_str());
+	return true;
+}
+
+bool DOS_Drive::IsDosLabelForm(const std::string_view name)
+{
+	constexpr size_t MaxBaseChars = 8;
+	constexpr size_t MaxExtChars  = 3;
+	const auto dot  = name.find('.');
+	const auto base = name.substr(0, dot);
+	if (base.empty() || base.size() > MaxBaseChars) {
+		return false;
+	}
+	if (dot == std::string_view::npos) {
+		return true;
+	}
+	const auto ext = name.substr(dot + 1);
+	return !ext.empty() && ext.size() <= MaxExtChars &&
+	       ext.find('.') == std::string_view::npos;
+}
+
+bool DOS_Drive::DeleteVolumeLabel()
+{
+	dirCache.ReplaceLabel("");
+	return true;
 }
 
 // static members variables

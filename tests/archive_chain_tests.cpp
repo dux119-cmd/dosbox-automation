@@ -18,6 +18,7 @@
 #include "dos/archive/archive_cache.h"
 #include "dos/archive/archive_helper_client.h"
 #include "dos/archive/chain_resolver.h"
+#include "test_home.h"
 #include "test_temp_dir.h"
 
 using namespace ArchiveMount;
@@ -365,11 +366,11 @@ protected:
 	// The house RAR (RAR5 by default); absent on the builders.
 	static std::optional<fs::path> RarBinary()
 	{
-		const char* home = std::getenv("HOME");
+		const auto home = TestHome::UserHome();
 		if (!home) {
 			return std::nullopt;
 		}
-		const auto rar = fs::path(home) / "bin" / "rar" / "rar";
+		const auto rar = fs::path(*home) / "bin" / "rar" / "rar";
 		if (!fs::is_regular_file(rar)) {
 			return std::nullopt;
 		}

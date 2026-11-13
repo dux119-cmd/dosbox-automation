@@ -24,11 +24,23 @@ inline constexpr std::string_view MenuProgram = "Y:\\DOS\\UNIMENU.EXE";
 // the menu turn never goes to a program someone else put at that path.
 bool MenuProgramAvailable();
 
+// Whether the bundled Y: drive holds UniMenu; for the start, before the
+// autoexec has mounted Y:.
+bool MenuProgramBundled();
+
+// [dos] unimenu: whether the engine starts UniMenu on its own. A manual
+// start does not ask.
+bool AutoLaunchEnabled();
+
 // A later session replaces this one. With exit_after a final choice ends
 // with EXIT, as MOUNT -run -exit does after its program.
 void Open(char drive, ArchiveChooser::Menu menu, bool exit_after = false);
 
 void Close();
+
+// UniMenu started by hand: the current drive's CHOOSER.TML, otherwise its
+// scanned programs, without EXIT. False when the drive offers nothing.
+bool OpenForCurrentDrive();
 
 // False once closed, or once the drive letter holds another drive.
 bool IsOpen();

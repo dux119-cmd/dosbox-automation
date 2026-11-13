@@ -95,6 +95,26 @@ TEST(ArchiveTree, ARootPathMakesThatDirectoryTheRoot)
 	EXPECT_FALSE(ArchiveTree::Build(Game(), "GAME\\DOOM.EXE", &error));
 }
 
+// Staging's automount layout: drives/<letter> and at most confs beside it.
+TEST(ArchiveTree, TheAutomountLayoutIsDrivesAndConfsOnly)
+{
+	EXPECT_TRUE(IsAutomountLayout(
+	        {Dir(0, "drives", "DRIVES"),
+	         Dir(1, "drives/c", "DRIVES\\C"),
+	         File(2, "drives/c/game.exe", "DRIVES\\C\\GAME.EXE", 1),
+	         File(3, "dosbox.conf", "DOSBOX.CON", 1)}));
+	EXPECT_TRUE(IsAutomountLayout(
+	        {File(0, "DRIVES/C/GAME.EXE", "DRIVES\\C\\GAME.EXE", 1)}));
+	EXPECT_FALSE(IsAutomountLayout(
+	        {File(0, "drives/c/game.exe", "DRIVES\\C\\GAME.EXE", 1),
+	         File(1, "game.exe", "GAME.EXE", 1)}));
+	EXPECT_FALSE(IsAutomountLayout({File(0, "drives", "DRIVES", 1)}));
+	EXPECT_FALSE(IsAutomountLayout({File(0, "dosbox.conf", "DOSBOX.CON", 1)}));
+	EXPECT_FALSE(IsAutomountLayout(
+	        {Dir(0, "x", "X"), File(1, "x/dosbox.conf", "X\\DOSBOX.CON", 1)}));
+	EXPECT_FALSE(IsAutomountLayout({}));
+}
+
 TEST(ArchiveTree, SoloRootDirectoryIsTheOneTopDirectoryEverythingLivesUnder)
 {
 	EXPECT_EQ(SoloRootDirectory(Game()), "GAME");

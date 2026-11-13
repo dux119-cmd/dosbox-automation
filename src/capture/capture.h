@@ -1,6 +1,7 @@
 // SPDX-FileCopyrightText:  2023-2026 The DOSBox Staging Team
 // SPDX-FileCopyrightText:  2002-2021 The DOSBox Team
 // SPDX-License-Identifier: GPL-2.0-or-later
+// Copyright (C) 2026 dosbox-automation contributors
 
 #ifndef DOSBOX_CAPTURE_H
 #define DOSBOX_CAPTURE_H
@@ -57,7 +58,8 @@ void CAPTURE_AddMidiData(const bool sysex, const size_t len, const uint8_t* data
 // rendered output at window resolution as shown on screen.
 enum class VideoCaptureMode : uint8_t { Raw, Rendered };
 
-void CAPTURE_StartVideoCapture(const VideoCaptureMode mode = VideoCaptureMode::Raw);
+// False when a video capture is already running; it goes on unchanged.
+bool CAPTURE_StartVideoCapture(const VideoCaptureMode mode = VideoCaptureMode::Raw);
 void CAPTURE_StopVideoCapture();
 
 VideoCaptureMode CAPTURE_GetVideoCaptureMode();
@@ -90,7 +92,16 @@ enum class VideoCaptureEndReason : uint8_t {
 };
 VideoCaptureEndReason CAPTURE_GetVideoCaptureEndReason();
 
-void CAPTURE_StartAudioCapture(const std::string& path = {});
+// False when an audio capture is already running; its file stays the same.
+bool CAPTURE_StartAudioCapture();
+
+enum class AudioCaptureStart { Started, AlreadyCapturing, PathRefused };
+
+// Starts audio capture into a new file in the capture folder that an explicit
+// path names (ada-11qi). The file is created here, so a refusal is reported
+// and never turns into a recording elsewhere. Emulation thread only.
+AudioCaptureStart CAPTURE_StartAudioCaptureAt(const std::string& requested,
+                                              std::string& file);
 void CAPTURE_StopAudioCapture();
 bool CAPTURE_IsCapturingAudio();
 bool CAPTURE_IsCapturingImage();

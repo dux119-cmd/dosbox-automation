@@ -6,6 +6,7 @@
 
 #include <algorithm>
 #include <fstream>
+#include <functional>
 #include <map>
 #include <memory>
 #include <set>
@@ -315,6 +316,11 @@ protected:
 				        EXPECT_TRUE(SHELL_QueuePendingCommands(
 				                it->second));
 			        }
+			        if (const auto it = batches_on.find(line);
+			            it != batches_on.end()) {
+				        EXPECT_TRUE(SHELL_QueuePendingBatch(
+				                it->second, on_batch_end));
+			        }
 			        if (delegated.contains(name)) {
 				        return shell().DOS_Shell::ExecuteShellCommand(
 				                name, args);
@@ -346,6 +352,9 @@ protected:
 	std::vector<std::string> seen                             = {};
 	std::map<std::string, std::vector<std::string>> queues_on = {};
 	std::set<std::string> delegated                           = {};
+
+	std::map<std::string, std::vector<std::string>> batches_on = {};
+	std::function<void()> on_batch_end                         = {};
 };
 
 // A PSP with a file table and C: on a temp folder, so CALL reads a real
@@ -470,9 +479,20 @@ TEST_F(PendingCommandsTest, ControlCharactersAndOverlongLinesAreRefused)
 {
 	EXPECT_FALSE(SHELL_QueuePendingCommands({"GAME.EXE\r\nDEL *.*"}));
 	EXPECT_FALSE(SHELL_QueuePendingCommands({std::string("A\0B", 3)}));
-	EXPECT_FALSE(SHELL_QueuePendingCommands({"OK", "BAD\x1b"}));
+	EXPECT_FALSE(SHELL_QueuePendingCommands({"OK", "BAD\x07"}));
+	EXPECT_FALSE(SHELL_QueuePendingCommands({"OK", "BAD\x1f"}));
+	EXPECT_FALSE(SHELL_QueuePendingCommands({"OK", "BAD\x7f"}));
 	EXPECT_FALSE(SHELL_QueuePendingCommands({"OK", ""}));
 	EXPECT_FALSE(SHELL_QueuePendingCommands({std::string(CMD_MAXLINE - 1, 'A')}));
+	EXPECT_TRUE(SHELL_TakePendingCommands().empty());
+}
+
+// No caller of the verbatim queue sends ESC; a package's ANSI colours go
+// through the batch queue.
+TEST_F(PendingCommandsTest, AnEscapeIsRefused)
+{
+	const std::string line = "ECHO \x1b[1;33m1) Jill of the Jungle\x1b[0m";
+	EXPECT_FALSE(SHELL_QueuePendingCommands({"CLS", line}));
 	EXPECT_TRUE(SHELL_TakePendingCommands().empty());
 }
 
@@ -502,6 +522,55 @@ TEST_F(PendingCommandsCallTest, ACalledBatchFinishesBeforeTheNextQueuedLine)
 	             });
 	EXPECT_THAT(order, ElementsAre("INSIDE", "EXIT"))
 	        << ::testing::PrintToString(seen);
+}
+
+// A package's [autoexec] queued at a MOUNT runs as a batch file would.
+TEST_F(PendingCommandsCallTest, AQueuedBatchExpandsAndFindsItsLabels)
+{
+	ASSERT_TRUE(DOS_PSP(psp_segment).SetEnvironmentValue("ROOM", "Z"));
+	delegated = {"GOTO"};
+	batches_on["QUEUER"] = {"GOTO SKIP", "WRONG", ":SKIP", "RIGHT %ROOM% 100%%"};
+	Parse("QUEUER");
+	shell().RunBatchFile();
+	EXPECT_THAT(seen, ElementsAre("QUEUER", "GOTO SKIP", "RIGHT Z 100%"));
+}
+
+TEST_F(PendingCommandsTest, AQueuedBatchLeavesStrayBytesToTheBatchReader)
+{
+	const auto longest   = std::string(CMD_MAXLINE + 20, 'A');
+	batches_on["QUEUER"] = {"BEL\x07L", longest};
+	Parse("QUEUER");
+	shell().RunBatchFile();
+	EXPECT_THAT(seen,
+	            ElementsAre("QUEUER", "BELL", longest.substr(0, CMD_MAXLINE - 1)));
+}
+
+TEST_F(PendingCommandsTest, ABatchWaitsLikeAnyQueuedSet)
+{
+	EXPECT_FALSE(SHELL_QueuePendingBatch({}));
+	EXPECT_TRUE(SHELL_QueuePendingBatch({"FIRST"}));
+	EXPECT_FALSE(SHELL_QueuePendingBatch({"SECOND"}));
+	EXPECT_FALSE(SHELL_QueuePendingCommands({"THIRD"}));
+}
+
+TEST_F(PendingCommandsTest, ABatchSaysWhenItIsDone)
+{
+	auto ended           = 0;
+	on_batch_end         = [&] { ++ended; };
+	batches_on["QUEUER"] = {"ONE", "TWO"};
+	Parse("QUEUER");
+	EXPECT_EQ(ended, 0);
+	shell().RunBatchFile();
+	EXPECT_THAT(seen, ElementsAre("QUEUER", "ONE", "TWO"));
+	EXPECT_EQ(ended, 1);
+}
+
+TEST_F(PendingCommandsTest, ABatchThatNeverRunsStillSaysSo)
+{
+	auto ended = 0;
+	ASSERT_TRUE(SHELL_QueuePendingBatch({"ONE"}, [&] { ++ended; }));
+	SHELL_TakePendingCommands();
+	EXPECT_EQ(ended, 1);
 }
 
 // ada-cw1y: text after an expansion that filled SET's line buffer was
@@ -644,4 +713,26 @@ TEST_F(SubstTest, SecureModeRefusesTheSubstitution)
 	EXPECT_TRUE(Subst("L:\\GAMES").empty());
 }
 
+
+// The 12-hour clock has no hour 0: midnight is 12a, noon 12p, as in DIR and
+// TIME on MS-DOS.
+TEST_F(DOS_Shell_CMDSTest, TwelveHourTimesNameMidnightAndNoonTwelve)
+{
+	if (DOS_GetLocaleTimeFormat() != DosTimeFormat::Time12H) {
+		GTEST_SKIP() << "the host locale uses a 24-hour clock";
+	}
+	const char separator = DOS_GetLocaleTimeSeparator();
+	const auto expect = [separator](const char* hour, const char* minute, const char* half) {
+		return std::string(hour) + separator + minute + half;
+	};
+	EXPECT_EQ(format_time(0, 31, 0, 0), expect("12", "31", "a"));
+	EXPECT_EQ(format_time(1, 5, 0, 0), expect(" 1", "05", "a"));
+	EXPECT_EQ(format_time(11, 59, 0, 0), expect("11", "59", "a"));
+	EXPECT_EQ(format_time(12, 0, 0, 0), expect("12", "00", "p"));
+	EXPECT_EQ(format_time(13, 1, 0, 0), expect(" 1", "01", "p"));
+	EXPECT_EQ(format_time(23, 59, 0, 0), expect("11", "59", "p"));
+	EXPECT_EQ(format_time(0, 0, 5, 7, true),
+	          std::string("12") + separator + "00" + separator + "05" +
+	                  DOS_GetLocaleDecimalSeparator() + "07am");
+}
 } // namespace

@@ -15,6 +15,7 @@
 
 #include <algorithm>
 #include <cstring>
+#include <filesystem>
 #include <unordered_map>
 #include <vector>
 
@@ -931,13 +932,35 @@ bool UnionDrive::Rename(const char* oldname, const char* newname)
 	return true;
 }
 
+// Mirrors MOUNT -freesize (mount.cpp) so an archive drive and a directory
+// mount with the same free space look alike to DOS.
+UnionDrive::Allocation UnionDrive::AllocationForFreeBytes(const uintmax_t free_bytes)
+{
+	constexpr uintmax_t MaxClusters = 65534;
+	Allocation a                    = {};
+	const uintmax_t cluster_bytes = uintmax_t{a.bytes_sector} * a.sectors_cluster;
+	const auto free = std::min(free_bytes / cluster_bytes, MaxClusters);
+	a.free_clusters = static_cast<uint16_t>(free);
+	if (a.total_clusters < free) {
+		a.total_clusters = static_cast<uint16_t>(
+		        std::min(free + 10, MaxClusters));
+	}
+	return a;
+}
+
+// DOS asks for the free space on every call, so a game that fills the disk
+// sees it shrink.
 bool UnionDrive::AllocationInfo(uint16_t* bytes_sector, uint8_t* sectors_cluster,
                                 uint16_t* total_clusters, uint16_t* free_clusters)
 {
-	return impl->upper->AllocationInfo(bytes_sector,
-	                                   sectors_cluster,
-	                                   total_clusters,
-	                                   free_clusters);
+	std::error_code ec = {};
+	const auto space   = std::filesystem::space(impl->sidecar_dir, ec);
+	const auto a       = AllocationForFreeBytes(ec ? 0 : space.available);
+	*bytes_sector      = a.bytes_sector;
+	*sectors_cluster   = a.sectors_cluster;
+	*total_clusters    = a.total_clusters;
+	*free_clusters     = a.free_clusters;
+	return true;
 }
 
 bool UnionDrive::FileExists(const char* name)
@@ -996,6 +1019,12 @@ bool UnionDrive::InSidecar(const char* name)
 	return impl->UpperHas(name);
 }
 
+std::string UnionDrive::HostPathOf(const char* name)
+{
+	return impl->UpperHas(name) ? impl->upper->MapDosToHostFilename(name)
+	                            : std::string();
+}
+
 bool UnionDrive::IsReady()
 {
 	return impl->lower->IsReady();
@@ -1004,6 +1033,16 @@ bool UnionDrive::IsReady()
 const char* UnionDrive::GetLabel()
 {
 	return impl->lower->GetLabel();
+}
+
+bool UnionDrive::SetVolumeLabel(const std::string& name)
+{
+	return impl->lower->SetVolumeLabel(name);
+}
+
+bool UnionDrive::DeleteVolumeLabel()
+{
+	return impl->lower->DeleteVolumeLabel();
 }
 
 bool DriveHasOpenFiles(const DOS_Drive* drive)

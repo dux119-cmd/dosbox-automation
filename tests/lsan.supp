@@ -1,0 +1,7 @@
+# This file is part of the dosbox-automation Project.
+# License: GPL-2.0-or-later. Contact: dosbox-automation-project@trinity2k.net
+#
+# Mesa's EGL driver keeps 3008 bytes from SDL's offscreen GL setup and is
+# unloaded before exit, so LSan sees an unknown module; SDL alone does the
+# same (2026-11-12).
+leak:SDL_EGL_InitializeOffscreen

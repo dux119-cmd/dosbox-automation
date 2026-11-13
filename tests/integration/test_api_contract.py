@@ -637,6 +637,29 @@ def test_memory_allocate_xms_non_bestfit(dosbox):
     assert r.status_code == 400
 
 
+def test_memory_allocate_keeps_a_size_above_64_kib(dosbox):
+    """ada-npdp: 70000 bytes used to arrive as 4464."""
+    r = dosbox.memory_allocate(70000, area="CONV")
+    assert r.status_code == 200, r.text
+    addr = r.json()["addr"]
+    mcb = dosbox.memory_read(addr - 16, 16)
+    assert mcb.status_code == 200
+    size_paragraphs = struct.unpack_from("<H", mcb.content, 3)[0]
+    assert size_paragraphs == (70000 + 15) // 16
+    assert dosbox.memory_free(addr).status_code == 200
+
+    r = dosbox.memory_allocate(70000, area="XMS")
+    assert r.status_code == 200, r.text
+    assert dosbox.memory_free(r.json()["addr"]).status_code == 200
+
+
+def test_memory_allocate_refuses_a_size_the_area_cannot_serve(dosbox):
+    for size, area in ((0, "CONV"), (-1, "CONV"), (1.5, "CONV"), ("64", "CONV"),
+                       (1048561, "CONV"), (1048561, "UMA"), (2**32, "XMS")):
+        r = dosbox.memory_allocate(size, area=area)
+        assert r.status_code == 400, (size, area, r.text)
+
+
 # ---------------------------------------------------------------------------
 # Host validation
 # ---------------------------------------------------------------------------

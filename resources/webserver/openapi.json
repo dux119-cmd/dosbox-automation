@@ -2,7 +2,7 @@
   "openapi": "3.1.0",
   "info": {
     "title": "dosbox-automation control API",
-    "version": "0.85.0",
+    "version": "0.86.0-pre2",
     "description": "REST API for programmatic control of dosbox-automation. Automate installations, drive games, capture frames, and record or replay input.\n\nThe API is intended for local automation. By default the server binds to 127.0.0.1 and is not designed to be exposed to untrusted networks. Every endpoint under /api/v1 requires a bearer token; the documentation assets (this page, the landing page, openapi.json) are served without a token so the docs are browsable. Use the Authorize button to paste your token before running a request.\n\nAll endpoints read or write internal state atomically between emulated CPU steps. They never run during native DOS functions or interrupts, so the internal data structures are always consistent.",
     "license": {
       "name": "GPL-2.0-or-later"
@@ -58,6 +58,10 @@
     {
       "name": "I/O",
       "description": "Direct x86 I/O port access."
+    },
+    {
+      "name": "Mixer",
+      "description": "Master and channel volumes of the emulated audio mixer."
     }
   ],
   "security": [
@@ -145,7 +149,8 @@
                   "type": "object",
                   "properties": {
                     "version": {
-                      "type": "string"
+                      "type": "string",
+                      "description": "The version and the short build hash, as --version prints them."
                     },
                     "features": {
                       "type": "object",
@@ -188,7 +193,7 @@
                   }
                 },
                 "example": {
-                  "version": "dosbox-automation 0.85.0",
+                  "version": "0.86.0-pre2 (904885)",
                   "features": {
                     "memory": true,
                     "input": true,
@@ -221,6 +226,9 @@
           },
           "401": {
             "$ref": "#/components/responses/Unauthorized"
+          },
+          "503": {
+            "$ref": "#/components/responses/Busy"
           }
         }
       }
@@ -238,6 +246,9 @@
           },
           "401": {
             "$ref": "#/components/responses/Unauthorized"
+          },
+          "503": {
+            "$ref": "#/components/responses/Busy"
           }
         }
       }
@@ -267,6 +278,9 @@
           },
           "401": {
             "$ref": "#/components/responses/Unauthorized"
+          },
+          "503": {
+            "$ref": "#/components/responses/Busy"
           }
         }
       }
@@ -331,6 +345,9 @@
           },
           "401": {
             "$ref": "#/components/responses/Unauthorized"
+          },
+          "503": {
+            "$ref": "#/components/responses/Busy"
           }
         }
       },
@@ -388,6 +405,9 @@
           },
           "409": {
             "description": "Input recording active, or legacy cycles mode."
+          },
+          "503": {
+            "$ref": "#/components/responses/Busy"
           }
         }
       }
@@ -447,6 +467,12 @@
           },
           "401": {
             "$ref": "#/components/responses/Unauthorized"
+          },
+          "409": {
+            "$ref": "#/components/responses/NotMapped"
+          },
+          "503": {
+            "$ref": "#/components/responses/Busy"
           }
         }
       }
@@ -490,11 +516,40 @@
               }
             }
           },
+          "400": {
+            "description": "An unknown area or strategy, a strategy other than best_fit for XMS, or a size missing, not a whole number, or outside the area's range.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
           "401": {
             "$ref": "#/components/responses/Unauthorized"
           },
+          "409": {
+            "$ref": "#/components/responses/NotMapped"
+          },
           "503": {
-            "description": "Allocation failed."
+            "description": "Allocation failed (no body), or the emulation is busy: then the answer carries Retry-After and the Busy body, and the request was not run.",
+            "headers": {
+              "Retry-After": {
+                "description": "Seconds to wait before sending the request again.",
+                "schema": {
+                  "type": "integer",
+                  "example": 1
+                }
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
           }
         }
       }
@@ -533,10 +588,23 @@
             "description": "Freed."
           },
           "400": {
-            "$ref": "#/components/responses/BadRequest"
+            "description": "No block to free starts at the address (no body), or the body has no addr (Error body).",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
           },
           "401": {
             "$ref": "#/components/responses/Unauthorized"
+          },
+          "409": {
+            "$ref": "#/components/responses/NotMapped"
+          },
+          "503": {
+            "$ref": "#/components/responses/Busy"
           }
         }
       }
@@ -585,6 +653,12 @@
           },
           "401": {
             "$ref": "#/components/responses/Unauthorized"
+          },
+          "409": {
+            "$ref": "#/components/responses/NotMapped"
+          },
+          "503": {
+            "$ref": "#/components/responses/Busy"
           }
         }
       }
@@ -636,6 +710,12 @@
           },
           "401": {
             "$ref": "#/components/responses/Unauthorized"
+          },
+          "409": {
+            "$ref": "#/components/responses/NotMapped"
+          },
+          "503": {
+            "$ref": "#/components/responses/Busy"
           }
         }
       }
@@ -690,6 +770,12 @@
           },
           "412": {
             "description": "If-Match precondition failed."
+          },
+          "409": {
+            "$ref": "#/components/responses/NotMapped"
+          },
+          "503": {
+            "$ref": "#/components/responses/Busy"
           }
         }
       }
@@ -746,6 +832,12 @@
           },
           "412": {
             "description": "If-Match precondition failed."
+          },
+          "409": {
+            "$ref": "#/components/responses/NotMapped"
+          },
+          "503": {
+            "$ref": "#/components/responses/Busy"
           }
         }
       }
@@ -826,6 +918,9 @@
           },
           "401": {
             "$ref": "#/components/responses/Unauthorized"
+          },
+          "503": {
+            "$ref": "#/components/responses/Busy"
           }
         }
       }
@@ -846,6 +941,9 @@
           },
           "409": {
             "description": "Already recording."
+          },
+          "503": {
+            "$ref": "#/components/responses/Busy"
           }
         }
       }
@@ -1015,7 +1113,26 @@
             "$ref": "#/components/responses/Unauthorized"
           },
           "503": {
-            "description": "No frame available yet."
+            "description": "Raw mode: no frame has been drawn since start, for a few frames after the shell is up; send the request again after Retry-After seconds. Rendered mode: nothing was presented within two seconds (a paused or minimized emulator), answered without Retry-After.",
+            "headers": {
+              "Retry-After": {
+                "description": "Seconds to wait before sending the request again.",
+                "schema": {
+                  "type": "integer",
+                  "example": 1
+                }
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                },
+                "example": {
+                  "error": "No frame available yet"
+                }
+              }
+            }
           }
         }
       }
@@ -1049,7 +1166,26 @@
             "$ref": "#/components/responses/Unauthorized"
           },
           "503": {
-            "description": "No frame available yet."
+            "description": "No frame has been drawn since start, for a few frames after the shell is up. Send the request again after Retry-After seconds.",
+            "headers": {
+              "Retry-After": {
+                "description": "Seconds to wait before sending the request again.",
+                "schema": {
+                  "type": "integer",
+                  "example": 1
+                }
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                },
+                "example": {
+                  "error": "No frame available yet"
+                }
+              }
+            }
           }
         }
       }
@@ -1083,6 +1219,12 @@
           },
           "401": {
             "$ref": "#/components/responses/Unauthorized"
+          },
+          "409": {
+            "$ref": "#/components/responses/NotMapped"
+          },
+          "503": {
+            "$ref": "#/components/responses/Busy"
           }
         }
       }
@@ -1140,6 +1282,9 @@
           },
           "403": {
             "description": "Mount blocked by policy (mounts locked or path not allowed)."
+          },
+          "503": {
+            "$ref": "#/components/responses/Busy"
           }
         }
       }
@@ -1277,8 +1422,50 @@
           "400": {
             "$ref": "#/components/responses/BadRequest"
           },
+          "413": {
+            "description": "The script body is larger than 256 KB.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                },
+                "example": {
+                  "error": "script body exceeds 256 KB limit"
+                }
+              }
+            }
+          },
+          "415": {
+            "description": "Content-Type is missing or not text/plain or application/lua.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                },
+                "example": {
+                  "error": "unsupported Content-Type: application/json"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "Less than 2 s since the last load; Retry-After gives the seconds left.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                },
+                "example": {
+                  "error": "too many requests"
+                }
+              }
+            }
+          },
           "401": {
             "$ref": "#/components/responses/Unauthorized"
+          },
+          "503": {
+            "$ref": "#/components/responses/Busy"
           }
         }
       }
@@ -1314,6 +1501,9 @@
           },
           "401": {
             "$ref": "#/components/responses/Unauthorized"
+          },
+          "503": {
+            "$ref": "#/components/responses/Busy"
           }
         }
       }
@@ -1346,6 +1536,9 @@
           },
           "401": {
             "$ref": "#/components/responses/Unauthorized"
+          },
+          "503": {
+            "$ref": "#/components/responses/Busy"
           }
         }
       }
@@ -1375,6 +1568,9 @@
           },
           "401": {
             "$ref": "#/components/responses/Unauthorized"
+          },
+          "503": {
+            "$ref": "#/components/responses/Busy"
           }
         }
       }
@@ -1413,11 +1609,30 @@
               }
             }
           },
+          "400": {
+            "$ref": "#/components/responses/BadRequest"
+          },
           "401": {
             "$ref": "#/components/responses/Unauthorized"
           },
+          "409": {
+            "description": "A video capture is already running; it goes on unchanged.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                },
+                "example": {
+                  "error": "Already capturing video"
+                }
+              }
+            }
+          },
           "500": {
             "description": "Capture could not start."
+          },
+          "503": {
+            "$ref": "#/components/responses/Busy"
           }
         },
         "requestBody": {
@@ -1477,6 +1692,9 @@
           },
           "500": {
             "description": "Capture could not stop."
+          },
+          "503": {
+            "$ref": "#/components/responses/Busy"
           }
         }
       }
@@ -1529,6 +1747,9 @@
           },
           "401": {
             "$ref": "#/components/responses/Unauthorized"
+          },
+          "503": {
+            "$ref": "#/components/responses/Busy"
           }
         }
       }
@@ -1570,6 +1791,9 @@
           },
           "401": {
             "$ref": "#/components/responses/Unauthorized"
+          },
+          "503": {
+            "$ref": "#/components/responses/Busy"
           }
         }
       },
@@ -1625,6 +1849,9 @@
           },
           "401": {
             "$ref": "#/components/responses/Unauthorized"
+          },
+          "503": {
+            "$ref": "#/components/responses/Busy"
           }
         }
       }
@@ -1697,6 +1924,9 @@
           },
           "409": {
             "description": "Injection failed (e.g. another type in progress)."
+          },
+          "503": {
+            "$ref": "#/components/responses/Busy"
           }
         }
       }
@@ -1738,7 +1968,23 @@
                       "items": {
                         "type": "integer"
                       },
-                      "description": "Physical addresses where the value was found."
+                      "description": "Addresses where the value was found, as the running program sees them (physical while paging is off)."
+                    },
+                    "skipped": {
+                      "type": "array",
+                      "items": {
+                        "type": "object",
+                        "properties": {
+                          "start": {
+                            "type": "integer"
+                          },
+                          "end": {
+                            "type": "integer",
+                            "description": "Exclusive."
+                          }
+                        }
+                      },
+                      "description": "Ranges the guest's page tables do not map. They were not searched, and no match lies across their edges. Empty while paging is off."
                     }
                   }
                 },
@@ -1746,6 +1992,12 @@
                   "matches": [
                     65536,
                     131072
+                  ],
+                  "skipped": [
+                    {
+                      "start": 2097152,
+                      "end": 2101248
+                    }
                   ]
                 }
               }
@@ -1756,6 +2008,9 @@
           },
           "401": {
             "$ref": "#/components/responses/Unauthorized"
+          },
+          "503": {
+            "$ref": "#/components/responses/Busy"
           }
         }
       }
@@ -1983,6 +2238,9 @@
           },
           "401": {
             "$ref": "#/components/responses/Unauthorized"
+          },
+          "503": {
+            "$ref": "#/components/responses/Busy"
           }
         }
       },
@@ -2066,6 +2324,9 @@
           },
           "401": {
             "$ref": "#/components/responses/Unauthorized"
+          },
+          "503": {
+            "$ref": "#/components/responses/Busy"
           }
         }
       }
@@ -2138,6 +2399,511 @@
           },
           "401": {
             "$ref": "#/components/responses/Unauthorized"
+          },
+          "503": {
+            "$ref": "#/components/responses/Busy"
+          }
+        }
+      }
+    },
+    "/api/v1/capture/audio/start": {
+      "post": {
+        "tags": [
+          "Capture"
+        ],
+        "summary": "Start WAV audio capture",
+        "operationId": "audioCaptureStart",
+        "description": "Records the mixer output as a WAV file in the capture directory: auto-numbered, or under the given name. Works headless with SDL_AUDIODRIVER=dummy.",
+        "requestBody": {
+          "required": false,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "path": {
+                    "type": "string",
+                    "description": "A new file in the capture directory: a bare name is taken there, a path must lead into it. An existing file or link is never overwritten."
+                  }
+                }
+              },
+              "example": {
+                "path": "recording.wav"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Recording.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "status": {
+                      "type": "string"
+                    },
+                    "path": {
+                      "type": "string",
+                      "description": "Present when the request named one."
+                    }
+                  }
+                },
+                "example": {
+                  "status": "recording",
+                  "path": "/home/user/.config/dosbox-automation/capture/recording.wav"
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/BadRequest"
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "description": "The path leaves the capture directory, names a file or link that exists, or the file cannot be created there.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "A audio capture is already running; it goes on unchanged.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                },
+                "example": {
+                  "error": "Already capturing audio"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Capture could not start.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "503": {
+            "$ref": "#/components/responses/Busy"
+          }
+        }
+      }
+    },
+    "/api/v1/capture/audio/stop": {
+      "post": {
+        "tags": [
+          "Capture"
+        ],
+        "summary": "Stop audio capture",
+        "operationId": "audioCaptureStop",
+        "description": "Stops the capture and finalizes the WAV file.",
+        "responses": {
+          "200": {
+            "description": "Stopped.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "status": {
+                      "type": "string"
+                    }
+                  }
+                },
+                "example": {
+                  "status": "stopped"
+                }
+              }
+            }
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "500": {
+            "description": "Capture could not stop.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "503": {
+            "$ref": "#/components/responses/Busy"
+          }
+        }
+      }
+    },
+    "/api/v1/capture/audio/status": {
+      "get": {
+        "tags": [
+          "Capture"
+        ],
+        "summary": "Query audio capture state",
+        "operationId": "audioCaptureStatus",
+        "responses": {
+          "200": {
+            "description": "Audio capture state.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "capturing": {
+                      "type": "boolean"
+                    }
+                  }
+                },
+                "example": {
+                  "capturing": false
+                }
+              }
+            }
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "500": {
+            "description": "State could not be read.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "503": {
+            "$ref": "#/components/responses/Busy"
+          }
+        }
+      }
+    },
+    "/api/v1/mixer": {
+      "get": {
+        "tags": [
+          "Mixer"
+        ],
+        "summary": "Mixer state",
+        "operationId": "mixerStatus",
+        "description": "Master volume, mute flag, output rate and every channel with its two volume levels.",
+        "responses": {
+          "200": {
+            "description": "Mixer state.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/MixerState"
+                },
+                "example": {
+                  "master_volume": {
+                    "left": 1.0,
+                    "right": 1.0
+                  },
+                  "muted": false,
+                  "sample_rate": 48000,
+                  "channels": [
+                    {
+                      "name": "SB",
+                      "user_volume": {
+                        "left": 1.0,
+                        "right": 1.0
+                      },
+                      "app_volume": {
+                        "left": 1.0,
+                        "right": 1.0
+                      },
+                      "enabled": true,
+                      "sample_rate": 22050
+                    }
+                  ]
+                }
+              }
+            }
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "500": {
+            "description": "State could not be read.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "503": {
+            "$ref": "#/components/responses/Busy"
+          }
+        }
+      }
+    },
+    "/api/v1/mixer/volume": {
+      "put": {
+        "tags": [
+          "Mixer"
+        ],
+        "summary": "Set the master volume",
+        "operationId": "mixerSetVolume",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/StereoVolume"
+              },
+              "example": {
+                "left": 0.8,
+                "right": 0.8
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Applied volume.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/StereoVolume"
+                },
+                "example": {
+                  "left": 0.8,
+                  "right": 0.8
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "The body is not JSON, or a volume is missing, not a number, or negative.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "500": {
+            "description": "Volume could not be set.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "503": {
+            "$ref": "#/components/responses/Busy"
+          }
+        }
+      }
+    },
+    "/api/v1/mixer/mute": {
+      "post": {
+        "tags": [
+          "Mixer"
+        ],
+        "summary": "Mute the master output",
+        "operationId": "mixerMute",
+        "responses": {
+          "200": {
+            "description": "Mute state.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "muted": {
+                      "type": "boolean"
+                    }
+                  }
+                },
+                "example": {
+                  "muted": true
+                }
+              }
+            }
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "500": {
+            "description": "Mute state could not be set.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "503": {
+            "$ref": "#/components/responses/Busy"
+          }
+        }
+      }
+    },
+    "/api/v1/mixer/unmute": {
+      "post": {
+        "tags": [
+          "Mixer"
+        ],
+        "summary": "Unmute the master output",
+        "operationId": "mixerUnmute",
+        "responses": {
+          "200": {
+            "description": "Mute state.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "muted": {
+                      "type": "boolean"
+                    }
+                  }
+                },
+                "example": {
+                  "muted": false
+                }
+              }
+            }
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "500": {
+            "description": "Mute state could not be set.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "503": {
+            "$ref": "#/components/responses/Busy"
+          }
+        }
+      }
+    },
+    "/api/v1/mixer/channel/{name}": {
+      "put": {
+        "tags": [
+          "Mixer"
+        ],
+        "summary": "Set a channel's user volume",
+        "operationId": "mixerSetChannelVolume",
+        "parameters": [
+          {
+            "name": "name",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            },
+            "description": "Channel name as GET /api/v1/mixer lists it.",
+            "example": "SB"
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/StereoVolume"
+              },
+              "example": {
+                "left": 0.5,
+                "right": 0.5
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Applied volume.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "channel": {
+                      "type": "string"
+                    },
+                    "left": {
+                      "type": "number"
+                    },
+                    "right": {
+                      "type": "number"
+                    }
+                  }
+                },
+                "example": {
+                  "channel": "SB",
+                  "left": 0.5,
+                  "right": 0.5
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "An empty name, a body that is not JSON, or a volume missing, not a number, or negative.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "404": {
+            "description": "No mixer channel of that name.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Volume could not be set.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "503": {
+            "$ref": "#/components/responses/Busy"
           }
         }
       }
@@ -2206,6 +2972,50 @@
           "application/json": {
             "schema": {
               "$ref": "#/components/schemas/Error"
+            }
+          }
+        }
+      },
+      "Busy": {
+        "description": "The emulation thread did not take the request in time, for example while a MOUNT identifies a large archive or a device initialises. The request was not run: send it again after Retry-After seconds. GET /api/v1/status answers meanwhile and shows an archive mount at work.",
+        "headers": {
+          "Retry-After": {
+            "description": "Seconds to wait before sending the request again.",
+            "schema": {
+              "type": "integer",
+              "example": 1
+            }
+          }
+        },
+        "content": {
+          "application/json": {
+            "schema": {
+              "$ref": "#/components/schemas/Error"
+            },
+            "example": {
+              "error": "Emulation busy, retry later"
+            }
+          }
+        }
+      },
+      "NotMapped": {
+        "description": "The guest runs with paging on and its page tables do not grant an address the request needs, at the privilege the program runs with. Nothing was read or written, and the guest saw no page fault. `address` is the first address refused.",
+        "content": {
+          "application/json": {
+            "schema": {
+              "type": "object",
+              "properties": {
+                "error": {
+                  "type": "string"
+                },
+                "address": {
+                  "type": "integer"
+                }
+              }
+            },
+            "example": {
+              "error": "Guest page tables do not map address 0x200000",
+              "address": 2097152
             }
           }
         }
@@ -2345,14 +3155,14 @@
       "MemoryAllocate": {
         "type": "object",
         "required": [
-          "size",
-          "area",
-          "strategy"
+          "size"
         ],
         "properties": {
           "size": {
             "type": "integer",
-            "description": "Bytes to allocate."
+            "minimum": 1,
+            "maximum": 4294967295,
+            "description": "Bytes to allocate, a whole number from 1. CONV and UMA take at most 1048560 (FFFFh paragraphs, the most a DOS allocation can name), XMS at most 4294967295. A size outside that answers 400; a size the area has no room for answers 503."
           },
           "area": {
             "type": "string",
@@ -2360,7 +3170,8 @@
               "CONV",
               "UMA",
               "XMS"
-            ]
+            ],
+            "default": "CONV"
           },
           "strategy": {
             "type": "string",
@@ -2369,6 +3180,7 @@
               "FIRST_FIT",
               "LAST_FIT"
             ],
+            "default": "BEST_FIT",
             "description": "The XMS allocator only supports BEST_FIT."
           }
         }
@@ -2686,6 +3498,68 @@
           "isLast": {
             "type": "boolean",
             "description": "True if this is the last block in the chain."
+          }
+        }
+      },
+      "StereoVolume": {
+        "type": "object",
+        "required": [
+          "left",
+          "right"
+        ],
+        "properties": {
+          "left": {
+            "type": "number",
+            "minimum": 0
+          },
+          "right": {
+            "type": "number",
+            "minimum": 0
+          }
+        },
+        "description": "Linear gain: 1.0 is unity, 0.0 silence, above 1.0 amplifies."
+      },
+      "MixerState": {
+        "type": "object",
+        "properties": {
+          "master_volume": {
+            "$ref": "#/components/schemas/StereoVolume"
+          },
+          "muted": {
+            "type": "boolean"
+          },
+          "sample_rate": {
+            "type": "integer",
+            "description": "Mixer output rate in Hz."
+          },
+          "channels": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "properties": {
+                "name": {
+                  "type": "string",
+                  "description": "Channel name from the emulated hardware, such as SB, OPL, SPKR, GUS, CDAUDIO."
+                },
+                "user_volume": {
+                  "$ref": "#/components/schemas/StereoVolume"
+                },
+                "app_volume": {
+                  "allOf": [
+                    {
+                      "$ref": "#/components/schemas/StereoVolume"
+                    }
+                  ],
+                  "description": "The level the running DOS program set through the hardware's own mixer; the output is the product of both."
+                },
+                "enabled": {
+                  "type": "boolean"
+                },
+                "sample_rate": {
+                  "type": "integer"
+                }
+              }
+            }
           }
         }
       }

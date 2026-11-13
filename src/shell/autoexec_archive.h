@@ -25,6 +25,16 @@ std::optional<Argument> Classify(const std::filesystem::path& path);
 std::optional<std::vector<std::string>> ArchiveLines(const std::string& path,
                                                      std::string_view run);
 
+// MOUNT -run on the C: a game package's own MOUNT lines set up (ada-0lv8).
+std::string RunOnMountedLine(std::string_view run);
+
+// The archive as C: without -run, for a package whose [autoexec] stops at
+// the prompt; nothing when the path cannot be quoted.
+std::optional<std::vector<std::string>> MountLines(const std::string& path);
+
+// UniMenu on the current drive, after a package that stops at the prompt.
+std::string MenuLine();
+
 } // namespace AutoexecArchive
 
 #endif

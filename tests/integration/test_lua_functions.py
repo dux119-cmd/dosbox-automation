@@ -8,7 +8,9 @@ Each test loads a script that exercises one function, writes results
 to dosbox.output, and verifies via the status endpoint.
 """
 
+import secrets
 import time
+from pathlib import Path
 
 import pytest
 
@@ -230,6 +232,82 @@ def test_capture_start_stop_does_not_error(dosbox):
         "dosbox.output.ok = 'yes'\n"
     ))
     assert out["ok"] == "yes"
+
+
+def run_failing_script(dosbox, source, name="func-test-error"):
+    time.sleep(2.1)  # rate limiter
+    r = dosbox.script_load(source, name=name)
+    assert r.status_code == 200, f"Load failed: {r.json()}"
+    r = dosbox.script_start()
+    assert r.status_code == 200, f"Start failed: {r.json()}"
+    return dosbox.wait_script_done()
+
+
+def test_capture_start_while_capturing_raises(dosbox):
+    try:
+        data = run_failing_script(dosbox, (
+            "dosbox.capture_start('raw')\n"
+            "dosbox.wait_frames(5)\n"
+            "dosbox.capture_start('rendered')\n"
+            "dosbox.output.ok = 'yes'\n"
+        ))
+        assert data["state"] == "error", data
+        assert "already capturing video" in data.get("error", ""), data
+        status = dosbox.capture_status().json()
+        assert status["capturing"] is True
+        assert status["mode"] == "raw"
+    finally:
+        dosbox.capture_stop()
+
+
+def test_audio_capture_start_while_capturing_raises(dosbox):
+    try:
+        data = run_failing_script(dosbox, (
+            "dosbox.audio_capture_start()\n"
+            "dosbox.wait_frames(5)\n"
+            "dosbox.audio_capture_start()\n"
+            "dosbox.output.ok = 'yes'\n"
+        ))
+        assert data["state"] == "error", data
+        assert "already capturing audio" in data.get("error", ""), data
+    finally:
+        dosbox.audio_capture_stop()
+
+
+def test_audio_capture_path_outside_the_capture_folder_raises(dosbox, tmp_path):
+    target = tmp_path / "lua-outside.wav"
+    try:
+        data = run_failing_script(dosbox, (
+            f"dosbox.audio_capture_start({str(target)!r})\n"
+            "dosbox.output.ok = 'yes'\n"
+        ))
+        assert data["state"] == "error", data
+        assert "capture folder" in data.get("error", ""), data
+    finally:
+        dosbox.audio_capture_stop()
+    assert not target.exists()
+
+
+def test_a_cancelled_named_capture_leaves_no_file_and_no_name_behind(dosbox):
+    """A named start stopped before any audio arrives leaves nothing, and the
+    next start without a name gets a numbered file (ada-11qi)."""
+    name = f"cancel-{secrets.token_hex(4)}.wav"
+    probe = dosbox.audio_capture_start(f"probe-{secrets.token_hex(4)}.wav")
+    assert probe.status_code == 200, probe.text
+    dosbox.audio_capture_stop()
+    folder = Path(probe.json()["path"]).parent
+    Path(probe.json()["path"]).unlink(missing_ok=True)
+    run_script(dosbox, (
+        f"dosbox.audio_capture_start({name!r})\n"
+        "dosbox.audio_capture_stop()\n"
+    ))
+    r = dosbox.audio_capture_start()
+    assert r.status_code == 200, r.text
+    try:
+        time.sleep(0.5)
+    finally:
+        dosbox.audio_capture_stop()
+    assert not (folder / name).exists()
 
 
 def test_output_table_multiple_values(dosbox):

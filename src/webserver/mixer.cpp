@@ -135,7 +135,8 @@ void MixerSetVolumeCommand::Put(const httplib::Request& req, httplib::Response& 
 
 void MixerMuteCommand::Execute()
 {
-	MIXER_Mute();
+	MIXER_SetManualMute(true);
+	muted = MIXER_IsManuallyMuted();
 }
 
 void MixerMuteCommand::Post(const httplib::Request&, httplib::Response& res)
@@ -152,7 +153,7 @@ void MixerMuteCommand::Post(const httplib::Request&, httplib::Response& res)
 	}
 
 	json result;
-	result["muted"] = true;
+	result["muted"] = cmd.muted;
 	send_json(res, result);
 }
 
@@ -160,7 +161,8 @@ void MixerMuteCommand::Post(const httplib::Request&, httplib::Response& res)
 
 void MixerUnmuteCommand::Execute()
 {
-	MIXER_Unmute();
+	MIXER_SetManualMute(false);
+	muted = MIXER_IsManuallyMuted();
 }
 
 void MixerUnmuteCommand::Post(const httplib::Request&, httplib::Response& res)
@@ -177,7 +179,7 @@ void MixerUnmuteCommand::Post(const httplib::Request&, httplib::Response& res)
 	}
 
 	json result;
-	result["muted"] = false;
+	result["muted"] = cmd.muted;
 	send_json(res, result);
 }
 

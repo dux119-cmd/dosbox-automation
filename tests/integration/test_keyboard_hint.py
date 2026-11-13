@@ -17,8 +17,11 @@ KDE = {"XDG_CURRENT_DESKTOP": "KDE"}
 
 
 def screen_after_start(dosbox_e2e, tmp_path, layout_list, keyboard_layout=None):
+    from conftest import engine_home
+
     work_dir = tmp_path / "work"
-    config_home = work_dir / ".config"
+    home_dir = engine_home(work_dir)
+    config_home = home_dir / ".config"
     config_home.mkdir(parents=True)
     (config_home / "kxkbrc").write_text(
         f"[Layout]\nLayoutList={layout_list}\nVariantList=\n", encoding="utf-8")

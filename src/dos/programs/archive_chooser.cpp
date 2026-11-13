@@ -3,6 +3,7 @@
 //
 #include "dos/programs/archive_chooser.h"
 
+#include "augra/log.h"
 #include "dos/archive/archive_toml.h"
 #include "dos/dos.h"
 #include "dos/drives.h"
@@ -292,10 +293,19 @@ ProgramScan ScanPrograms(const char drive_letter)
 
 	std::vector<Entry> entries = {};
 	bool has_dosbox_bat        = false;
+	size_t entries_read        = 0;
+
+	const auto take_entry = [&entries_read]() {
+		if (entries_read >= MaxScanEntries) {
+			return false;
+		}
+		++entries_read;
+		return true;
+	};
 
 	const auto root_pattern = std::string(1, letter) + ":\\*.*";
 	auto entry              = search.First(root_pattern);
-	while (entry) {
+	while (entry && take_entry()) {
 		if (entry->IsFile()) {
 			const auto upper = AsciiUpper(entry->name);
 			if (upper == "DOSBOX.BAT") {
@@ -314,24 +324,28 @@ ProgramScan ScanPrograms(const char drive_letter)
 		entry = search.Next();
 	}
 
-	std::vector<std::string> subdirs = {};
-	{
-		TempDtaSearch dir_search = {};
-		auto dir_entry           = dir_search.First(root_pattern);
-		while (dir_entry) {
+	const auto folders_in = [&](const std::string& dir) {
+		const auto pattern = std::string(1, letter) + ":\\" +
+		                     (dir.empty() ? "" : dir + "\\") + "*.*";
+		std::vector<std::string> found = {};
+		TempDtaSearch dir_search       = {};
+		auto dir_entry                 = dir_search.First(pattern);
+		while (dir_entry && take_entry()) {
 			if (dir_entry->IsDirectory() &&
 			    !dir_entry->IsDummyDirectory()) {
-				subdirs.push_back(AsciiUpper(dir_entry->name));
+				const auto name = AsciiUpper(dir_entry->name);
+				found.push_back(dir.empty() ? name : dir + "\\" + name);
 			}
 			dir_entry = dir_search.Next();
 		}
-	}
-	for (const auto& dir_name : subdirs) {
+		return found;
+	};
+	const auto programs_in = [&](const std::string& dir_name) {
 		const auto sub_pattern = std::string(1, letter) + ":\\" +
 		                         dir_name + "\\*.*";
 		TempDtaSearch sub_search = {};
 		auto sub_entry           = sub_search.First(sub_pattern);
-		while (sub_entry) {
+		while (sub_entry && take_entry()) {
 			if (sub_entry->IsFile()) {
 				const auto upper = AsciiUpper(sub_entry->name);
 				const auto ext   = sub_entry->GetExtension();
@@ -347,6 +361,16 @@ ProgramScan ScanPrograms(const char drive_letter)
 				}
 			}
 			sub_entry = sub_search.Next();
+		}
+	};
+	// Two folder levels: GOG and folder rips keep the game in GAME\BIN.
+	for (const auto& dir_name : folders_in("")) {
+		if (entries_read >= MaxScanEntries) {
+			break;
+		}
+		programs_in(dir_name);
+		for (const auto& inner : folders_in(dir_name)) {
+			programs_in(inner);
 		}
 	}
 
@@ -368,7 +392,13 @@ ProgramScan ScanPrograms(const char drive_letter)
 	if (entries.size() > MaxEntries) {
 		entries.resize(MaxEntries);
 	}
-	return {std::move(entries), has_dosbox_bat};
+	if (entries_read >= MaxScanEntries) {
+		augra::log_warn("menu",
+		                "program scan of %c: stopped after %zu directory entries",
+		                letter,
+		                entries_read);
+	}
+	return {std::move(entries), has_dosbox_bat, entries_read};
 }
 
 Menu ProgramMenu(const char drive_letter, std::vector<Entry> entries)

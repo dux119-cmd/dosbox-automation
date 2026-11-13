@@ -25,9 +25,11 @@
 
 #include "capture/capture.h"
 #include "config/config.h"
+#include "config/host_only.h"
 #include "cpu/callback.h"
 #include "cpu/registers.h"
 #include "dos/programs/more_output.h"
+#include "dos/programs/mount_policy.h"
 #include "gui/mapper.h"
 #include "hardware/memory.h"
 #include "misc/cross.h"
@@ -271,6 +273,17 @@ private:
 	{
 		if (control->SecureMode()) {
 			WriteOut(MSG_Get("PROGRAM_CONFIG_SECURE_DISALLOW"));
+			return true;
+		}
+		return false;
+	}
+
+	// A guest that writes host files can reach what the mount whitelist
+	// keeps out, a shell startup file or the primary conf (ada-u6bo).
+	bool RefuseHostWrite()
+	{
+		if (MountPolicy::IsInjectionPossible()) {
+			WriteOut(MSG_Get("PROGRAM_CONFIG_HOST_WRITE_REFUSED"));
 			return true;
 		}
 		return false;
@@ -576,25 +589,13 @@ void CONFIG::Run(void)
 			if (CheckSecureMode()) {
 				return;
 			}
-			if (parameters.empty()) {
-				DOSBOX_Restart();
-			} else {
-				std::vector<std::string> restart_params;
-
-				restart_params.emplace_back(
-				        control->cmdline->GetFileName());
-
-				for (size_t i = 0; i < parameters.size(); i++) {
-					restart_params.emplace_back(parameters[i]);
-				}
-
-				const auto remaining_args = cmd->GetArguments();
-				restart_params.insert(restart_params.end(),
-				                      remaining_args.begin(),
-				                      remaining_args.end());
-
-				DOSBOX_Restart(restart_params);
+			// Parameters would become the new engine's command line,
+			// where --set or -conf reach [webserver]
+			if (!parameters.empty() || !cmd->GetArguments().empty()) {
+				WriteOut(MSG_Get("PROGRAM_CONFIG_RESTART_NO_PARAMETERS"));
+				return;
 			}
+			DOSBOX_Restart();
 			return;
 
 		case ListConfig: {
@@ -641,7 +642,7 @@ void CONFIG::Run(void)
 		}
 
 		case WriteDefaultConfig: {
-			if (CheckSecureMode()) {
+			if (CheckSecureMode() || RefuseHostWrite()) {
 				return;
 			}
 			if (!parameters.empty()) {
@@ -654,7 +655,7 @@ void CONFIG::Run(void)
 
 		case WriteConfig1:
 		case WriteConfig2:
-			if (CheckSecureMode()) {
+			if (CheckSecureMode() || RefuseHostWrite()) {
 				return;
 			}
 			if (parameters.size() > 1) {
@@ -887,11 +888,25 @@ void CONFIG::Run(void)
 					return;
 				}
 
+				// Nothing inside DOS may switch the REST API on or
+				// move it
+				if (std::string_view(section->GetName()) == "webserver") {
+					WriteOut(MSG_Get("PROGRAM_CONFIG_WEBSERVER_HOST_ONLY"));
+					return;
+				}
+
 				auto* property = section->GetProperty(parameters[1]);
 
 				if (!property) {
 					WriteOut(MSG_Get("PROGRAM_CONFIG_SECTION_OR_SETTING_NOT_FOUND"),
 					         parameters[1].c_str());
+					return;
+				}
+
+				// Settings a guest could turn against the host
+				if (HostOnly::Covers(section->GetName(), property->propname)) {
+					WriteOut(MSG_Get("PROGRAM_CONFIG_HOST_ONLY_SETTING"),
+					         property->propname.c_str());
 					return;
 				}
 
@@ -942,7 +957,7 @@ void CONFIG::Run(void)
 		case WriteLanguageFile2:
 			// In secure mode don't allow a new languagefile to be
 			// created Who knows which kind of file we would overwrite.
-			if (CheckSecureMode()) {
+			if (CheckSecureMode() || RefuseHostWrite()) {
 				return;
 			}
 
@@ -1019,9 +1034,8 @@ void PROGRAMS_AddMessages()
 	        "  -wl [color=white]FILENAME      [reset]write the current language strings to [color=white]FILENAME [reset]in the\n"
 	        "                    current working directory\n"
 	        "\n"
-	        "  -r [color=light-cyan][PROPERTY1=VALUE1 [PROPERTY2=VALUE2 ...]][reset]\n"
-	        "                    restart DOSBox with the optionally supplied config\n"
-	        "                    properties\n"
+	        "  -r                restart dosbox-automation with its original command line\n"
+	        "                    and the settings changed with -set that only apply at start\n"
 	        "\n"
 	        "  -l                show the currently loaded config files and command line\n"
 	        "                    arguments provided at startup\n"
@@ -1089,6 +1103,8 @@ void PROGRAMS_AddMessages()
 
 	MSG_Add("PROGRAM_CONFIG_SECURE_ON", "Secure mode enabled.\n");
 
+	MSG_Add("PROGRAM_CONFIG_HOST_WRITE_REFUSED",
+	        "CONFIG does not write files on the host while the REST API is on.\n");
 	MSG_Add("PROGRAM_CONFIG_SECURE_DISALLOW",
 	        "This operation is not permitted in secure mode.\n");
 
@@ -1116,6 +1132,19 @@ void PROGRAMS_AddMessages()
 	        "[color=yellow]The '%s' setting can't be changed at runtime.[reset]\n"
 	        "However, it will be applied on restart by running 'CONFIG -r' or via the\n"
 	        "restart hotkey.\n");
+
+	MSG_Add("PROGRAM_CONFIG_RESTART_NO_PARAMETERS",
+	        "[color=yellow]CONFIG -r takes no parameters.[reset]\n"
+	        "Settings that only apply at start, changed with CONFIG -set, carry over\n"
+	        "to CONFIG -r.\n");
+
+	MSG_Add("PROGRAM_CONFIG_WEBSERVER_HOST_ONLY",
+	        "[color=yellow]The [webserver] settings can't be changed from inside DOS.[reset]\n"
+	        "Set them in the config file or with --set on the command line.\n");
+
+	MSG_Add("PROGRAM_CONFIG_HOST_ONLY_SETTING",
+	        "[color=yellow]The '%s' setting can't be changed from inside DOS.[reset]\n"
+	        "Set it in the config file or with --set on the command line.\n");
 
 	MSG_Add("PROGRAM_CONFIG_DEPRECATED_BUT_ALLOWED_WARNING",
 	        "[color=light-red]This is a deprecated setting only kept for "

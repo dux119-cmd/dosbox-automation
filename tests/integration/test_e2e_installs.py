@@ -290,7 +290,8 @@ def test_install(slug, manifest_path, dosbox_e2e):
         settings=settings,
     )
     client = instance.client
-    client.wait_shell(timeout=15)
+    # The replay's first post must not land while MOUNT holds the emulation thread.
+    client.wait_autoexec_done()
 
     start_time = time.monotonic()
     status = None

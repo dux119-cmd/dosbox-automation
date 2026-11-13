@@ -1,7 +1,9 @@
 // SPDX-FileCopyrightText:  2023-2025 The DOSBox Staging Team
 // SPDX-FileCopyrightText:  2002-2021 The DOSBox Team
 // SPDX-License-Identifier: GPL-2.0-or-later
+// Copyright (C) 2026 dosbox-automation contributors
 
+#include "private/capture_audio.h"
 #include "capture.h"
 
 #include <cstdio>
@@ -59,22 +61,45 @@ static uint8_t wav_header[] = {
 };
 // clang-format on
 
-static std::string pending_output_path = {};
+static FILE* named_handle      = nullptr;
+static std_fs::path named_file = {};
 
-void capture_audio_set_output_path(const std::string& path)
+bool capture_audio_open_output(const std_fs::path& path)
 {
-	pending_output_path = path;
+	capture_audio_discard_output();
+	// "x": a file or link put there since the path was checked stays
+	// (ada-11qi).
+	FILE* handle = fopen(path.string().c_str(), "wbx");
+	if (!handle) {
+		augra::log_warn("capture", "cannot create '%s'", path.string().c_str());
+		return false;
+	}
+	named_handle = handle;
+	named_file   = path;
+	augra::log_info("capture",
+	                "capturing audio output to '%s'",
+	                path.string().c_str());
+	return true;
+}
+
+void capture_audio_discard_output()
+{
+	if (!named_handle) {
+		return;
+	}
+	fclose(named_handle);
+	named_handle       = nullptr;
+	std::error_code ec = {};
+	std_fs::remove(named_file, ec);
+	named_file.clear();
 }
 
 static void create_wave_file(const uint32_t sample_rate_hz)
 {
-	if (!pending_output_path.empty()) {
-		wave.handle = fopen(pending_output_path.c_str(), "wb");
-		if (wave.handle) {
-			augra::log_info("capture", "capturing audio output to '%s'",
-			                pending_output_path.c_str());
-		}
-		pending_output_path.clear();
+	if (named_handle) {
+		wave.handle  = named_handle;
+		named_handle = nullptr;
+		named_file.clear();
 	} else {
 		wave.handle = CAPTURE_CreateFile(CaptureType::Audio);
 	}

@@ -172,6 +172,10 @@ std::optional<ArchiveTree> ArchiveTree::Build(const std::vector<Entry>& entries,
 		return fail("root path not in the archive: " +
 		            std::string(root_dos_path));
 	}
+	for (const auto child : tree.nodes[0].children) {
+		auto& node     = tree.nodes[static_cast<size_t>(child)];
+		node.is_hidden = node.is_dir && node.name == "_DOSBOX";
+	}
 	return tree;
 }
 
@@ -182,6 +186,29 @@ const TreeNode* ArchiveTree::Find(const std::string_view dos_path) const
 		return nullptr;
 	}
 	return &nodes[static_cast<size_t>(found->second)];
+}
+
+bool IsAutomountLayout(const std::vector<Entry>& entries)
+{
+	auto has_drives = false;
+	for (const auto& entry : entries) {
+		auto path = std::string_view(entry.utf8_path);
+		while (path.ends_with('/')) {
+			path.remove_suffix(1);
+		}
+		const auto slash = path.find('/');
+		auto head        = std::string(path.substr(0, slash));
+		std::transform(head.begin(), head.end(), head.begin(), [](const unsigned char c) {
+			return static_cast<char>(std::tolower(c));
+		});
+		if (head == "drives" && (slash != std::string_view::npos || entry.is_dir)) {
+			has_drives = true;
+		} else if (slash != std::string_view::npos || entry.is_dir ||
+		           !head.ends_with(".conf")) {
+			return false;
+		}
+	}
+	return has_drives;
 }
 
 std::string SoloRootDirectory(const std::vector<Entry>& entries)

@@ -47,7 +47,7 @@ Submissions generated with LLMs must include:
 
 ### Development process
 
-For transparency, this how tool assisted development is used.
+For transparency, this is how tool assisted development is used.
 Contributors using LLMs for code generation should follow the same approach.
 
 1. **Architecture and design decisions** are made by human software engineers.
@@ -363,10 +363,25 @@ Submit code changes via GitHub PRs. The key points:
 2. The branch tip must compile and pass the full test suite. Individual
    commits do not need to compile on their own.
 
-3. New source files written for this project get our two-line license
-   header (see any file under `src/lua/` or `src/webserver/` for the
-   format). Files inherited from DOSBox Staging keep their existing SPDX
-   headers as they are; do not convert between the two styles.
+
+#### Licensing
+
+Like DOSBox and DOSBox Staging before it, dosbox-automation is licensed
+under GPL-2.0-or-later, and that is the license for every contribution
+unless you choose otherwise. If you want another license for your work,
+one compatible with GPL-2.0-or-later, say so in your pull request and
+state it in the files you wrote.
+
+You keep the copyright of what you write. Our file headers name the
+project, or "dosbox-automation contributors" in files inherited from
+DOSBox Staging, and that stands for all of you. AUTHORS lists everyone
+who contributed, and the project's history records who wrote what. You
+may add your own copyright line to a file you wrote or substantially
+changed; you don't have to.
+
+New source files get our two-line license header (see any file under
+`src/lua/` or `src/webserver/`). Files inherited from DOSBox Staging keep
+their existing headers; do not convert between the two styles.
 
 
 #### Commit messages
@@ -444,11 +459,12 @@ whether one did.
 
 The project name is "dosbox-automation", written exactly in that convention.
 
-Version numbering follows the upstream base version with a "-da" release
-suffix. Example: if the upstream base is 0.83 and the release number is 3,
-the version is `0.83-da3`.
+Versions are MAJOR.MINOR.PATCH, starting from 0.86.0, and a release is
+named by its version alone. Pre-releases carry a suffix: 0.86.0-pre1,
+0.86.0-pre2, then 0.86.0.
 
-Full product name example: `dosbox-automation 0.83-da3`.
+Full product name examples: `dosbox-automation 0.86.0-pre1`,
+`dosbox-automation 0.86.0`.
 
 
 ## Tools

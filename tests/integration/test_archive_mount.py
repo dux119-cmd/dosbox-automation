@@ -111,7 +111,7 @@ def test_writes_are_refused_on_an_archive_drive(dosbox_e2e, tmp_path):
     assert "Access denied" in text or "denied" in text.lower(), text
 
 
-def test_sequential_archive_is_refused_unless_cached(dosbox_e2e, tmp_path):
+def test_sequential_archive_is_unpacked_unless_refused(dosbox_e2e, tmp_path):
     import tarfile
 
     tgz = tmp_path / "game" / "doom.tar.gz"
@@ -127,17 +127,19 @@ def test_sequential_archive_is_refused_unless_cached(dosbox_e2e, tmp_path):
     inst = dosbox_e2e(
         autoexec_lines=[f"mount c {tgz}"],
         conf_dir=tmp_path / "game",
-        settings=settings_for(tmp_path),
+        settings={**settings_for(tmp_path), "archive_sequential": "refuse"},
     )
     text = wait_text(inst.client, "sequential archive")
     assert "archive_sequential" in text, text
 
+    # The default unpacks it and says so.
     inst2 = dosbox_e2e(
         autoexec_lines=[f"mount c {tgz}", "c:", "type readme.txt"],
         conf_dir=tmp_path / "game",
-        settings={**settings_for(tmp_path), "archive_sequential": "cache"},
+        settings=settings_for(tmp_path),
     )
-    wait_text(inst2.client, "hi")
+    text = wait_text(inst2.client, "hi")
+    assert "cannot be read in place" in text, text
 
 
 def test_a_refusal_names_the_archive_as_typed_on_a_line_of_its_own(
@@ -155,7 +157,7 @@ def test_a_refusal_names_the_archive_as_typed_on_a_line_of_its_own(
         autoexec_lines=[f"mount c {tgz}"],
         work_dir=tmp_path,
         conf_dir=tmp_path / "game",
-        settings=settings_for(tmp_path),
+        settings={**settings_for(tmp_path), "archive_sequential": "refuse"},
     )
     wait_text(inst.client, "sequential archive")
     r = inst.client.screen_text()
@@ -470,7 +472,7 @@ def test_several_programs_open_the_menu_and_escape_keeps_the_engine(dosbox_e2e, 
                       settings=settings_for(tmp_path),
                       extra_args=[str(zip_path)])
     text = wait_text(inst.client, "Select a program")
-    assert "(FIRST.BAT)" in text and "(SECOND.BAT)" in text, text
+    assert "[ FIRST.BAT ]" in text and "[ SECOND.BAT ]" in text, text
     tap(inst.client, "KBD_esc")
     # Nothing chosen runs nothing, and the engine stays.
     wait_text(inst.client, "C:\\>")

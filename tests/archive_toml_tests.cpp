@@ -92,7 +92,7 @@ TEST(ArchiveToml, RefusesWhatTheEngineNeverWrites)
 	        "x = {a = 1}\n",
 	        "x = 1.5\n",
 	        "x = 1979-05-27\n",
-	        "x = 'literal'\n",
+	        "x = '''multi-line literal'''\n",
 	        "x = \"unterminated\n",
 	        "x = \"ctrl\x01\"\n",
 	        "x = \"bad\\q\"\n",
@@ -170,6 +170,178 @@ TEST(ArchiveToml, SetReplacesAnExistingKeyInPlace)
 	EXPECT_FALSE(t.Integer("a"));
 }
 
+TEST(ArchiveToml, ParsesAnArrayOfStrings)
+{
+	auto error = std::string();
+	const auto doc =
+	        Parse("conf = [\"dosbox*.conf\", \"dosbox*_single.conf\"]\n"
+	              "[[profile]]\n"
+	              "name = \"x\"\n"
+	              "setup = [ \"*_settings.conf\" ]\n",
+	              &error);
+	ASSERT_TRUE(doc) << error;
+	const auto root = doc->root.Strings("conf");
+	ASSERT_TRUE(root);
+	EXPECT_EQ(*root,
+	          (std::vector<std::string>{"dosbox*.conf", "dosbox*_single.conf"}));
+	const auto profiles = doc->Array("profile");
+	ASSERT_EQ(profiles.size(), 1u);
+	const auto setup = profiles[0]->Strings("setup");
+	ASSERT_TRUE(setup);
+	EXPECT_EQ(setup->size(), 1u);
+}
+
+// A profile file is written by hand, so a list may run over several lines
+// with comments and a trailing comma.
+TEST(ArchiveToml, AnArrayMaySpanLinesWithCommentsAndATrailingComma)
+{
+	auto error = std::string();
+	const auto doc =
+	        Parse("conf = [\n"
+	              "  \"a.conf\",  # the first\n"
+	              "\n"
+	              "  \"b.conf\",\n"
+	              "] # done\n"
+	              "after = 1\n",
+	              &error);
+	ASSERT_TRUE(doc) << error;
+	EXPECT_EQ(doc->root.Strings("conf"),
+	          (std::vector<std::string>{"a.conf", "b.conf"}));
+	EXPECT_EQ(doc->root.Integer("after"), 1);
+}
+
+TEST(ArchiveToml, AnEmptyArrayAndAMixedArrayAreTold)
+{
+	auto error       = std::string();
+	const auto empty = Parse("conf = []\n", &error);
+	ASSERT_TRUE(empty) << error;
+	ASSERT_TRUE(empty->root.Strings("conf"));
+	EXPECT_TRUE(empty->root.Strings("conf")->empty());
+	EXPECT_FALSE(Parse("conf = [\"a\", 1]\n", &error));
+	EXPECT_NE(error.find("array"), std::string::npos);
+	EXPECT_FALSE(Parse("conf = [\"a\"\n", &error));
+	EXPECT_NE(error.find("array"), std::string::npos);
+}
+
+TEST(ArchiveToml, RefusesMalformedArrays)
+{
+	const char* bad[] = {
+	        "x = [\"a\" \"b\"]\n",
+	        "x = [,]\n",
+	        "x = [\"a\",,]\n",
+	        "x = [\"a\"] y\n",
+	        "x = [[\"a\"]]\n",
+	        "x = [\"a\nb\"]\n",
+	        "x = [\n\"a\",\n",
+	};
+	for (const auto* text : bad) {
+		auto error = std::string();
+		EXPECT_FALSE(Parse(text, &error)) << text;
+		EXPECT_FALSE(error.empty()) << text;
+	}
+}
+
+// The profile file is written by hand, so it uses TOML's literal strings
+// (TOML 1.0, "String": no escapes, one line) and blanks inside headers.
+TEST(ArchiveToml, ReadsLiteralStringsVerbatim)
+{
+	auto error = std::string();
+	const auto doc =
+	        Parse("x = 'C:\\GAMES\\new \"one\"'\n"
+	              "y = ['a', \"b\", 'c\\d']\n"
+	              "z = ''\n",
+	              &error);
+	ASSERT_TRUE(doc) << error;
+	EXPECT_EQ(doc->root.String("x"), "C:\\GAMES\\new \"one\"");
+	EXPECT_EQ(doc->root.Strings("y"),
+	          (std::vector<std::string>{"a", "b", "c\\d"}));
+	EXPECT_EQ(doc->root.String("z"), "");
+}
+
+TEST(ArchiveToml, ReadsAProfileFileWrittenByHand)
+{
+	auto error = std::string();
+	const auto doc =
+	        Parse("[[ global ]]\n"
+	              "default_profile = 'default'\n"
+	              "\n"
+	              "[[\tlocal_dosbox_conf  ]]\n"
+	              "enabled = true\n"
+	              "dosconfig_paths = [ '.' ]\n"
+	              "dosconfig_file = [ 'dosbox.cnf', 'dosbox-automation.conf', "
+	              "'dosbox.conf' ]\n",
+	              &error);
+	ASSERT_TRUE(doc) << error;
+	const auto global = doc->Array("global");
+	ASSERT_EQ(global.size(), 1u);
+	EXPECT_EQ(global[0]->String("default_profile"), "default");
+	const auto local = doc->Array("local_dosbox_conf");
+	ASSERT_EQ(local.size(), 1u);
+	EXPECT_EQ(local[0]->Boolean("enabled"), true);
+	EXPECT_EQ(local[0]->Strings("dosconfig_file")->size(), 3u);
+}
+
+TEST(ArchiveToml, RefusesMalformedLiteralStringsAndHeaders)
+{
+	const char* bad[] = {
+	        "x = 'unterminated\n",
+	        "x = 'ctrl\x01'\n",
+	        "x = 'a' y\n",
+	        "x = ['a' 'b']\n",
+	        "x = ['a\nb']\n",
+	        "[[ a b ]]\n",
+	        "[[ ]]\n",
+	        "[[ a.b ]]\n",
+	        "[[ a ]] x\n",
+	};
+	for (const auto* text : bad) {
+		auto error = std::string();
+		EXPECT_FALSE(Parse(text, &error)) << text;
+		EXPECT_FALSE(error.empty()) << text;
+	}
+	auto error = std::string();
+	const auto long_value = "k = '" + std::string(MaxValueBytes + 1, 'v') + "'\n";
+	EXPECT_FALSE(Parse(long_value, &error));
+	EXPECT_NE(error.find("too long"), std::string::npos) << error;
+}
+
+TEST(ArchiveToml, StringsOnAScalarIsEmpty)
+{
+	auto error     = std::string();
+	const auto doc = Parse("conf = \"one\"\n", &error);
+	ASSERT_TRUE(doc) << error;
+	EXPECT_FALSE(doc->root.Strings("conf"));
+	EXPECT_EQ(doc->root.String("conf"), "one");
+}
+
+TEST(ArchiveToml, SerializesAnArrayOfStrings)
+{
+	Document doc = {};
+	doc.root.Set("conf", std::vector<std::string>{"a\"b", "c"});
+	doc.root.Set("none", std::vector<std::string>{});
+	const auto text = Serialize(doc);
+	EXPECT_EQ(text, "conf = [\"a\\\"b\", \"c\"]\nnone = []\n");
+	auto error      = std::string();
+	const auto back = Parse(text, &error);
+	ASSERT_TRUE(back) << error;
+	EXPECT_EQ(back->root.Strings("conf"),
+	          (std::vector<std::string>{"a\"b", "c"}));
+}
+
+// The value cap covers the whole array, not each item, so many short
+// strings cannot add up past it.
+TEST(ArchiveToml, AnArrayOverTheValueCapIsRefused)
+{
+	auto text = std::string("x = [");
+	for (size_t total = 0; total <= MaxValueBytes; total += 10) {
+		text += "\"1234567890\", ";
+	}
+	text += "]\n";
+	auto error = std::string();
+	EXPECT_FALSE(Parse(text, &error));
+	EXPECT_NE(error.find("too long"), std::string::npos) << error;
+}
+
 TEST(ArchiveToml, WritesAtomicallyAndReadsBack)
 {
 	const auto dir = TestTempDir::MakeUnique("archive_toml_");
@@ -192,6 +364,23 @@ TEST(ArchiveToml, WritesAtomicallyAndReadsBack)
 	const auto back = ReadFile(path, &error);
 	ASSERT_TRUE(back) << error;
 	EXPECT_EQ(back->root.Integer("v"), 2);
+	std::error_code ec = {};
+	fs::remove_all(dir, ec);
+}
+
+// A file the user edits by hand goes back to disk as the text it was, not
+// as a serialized document that would lose the comments.
+TEST(ArchiveToml, TextKeepsItsCommentsThroughAnAtomicWrite)
+{
+	const auto dir = TestTempDir::MakeUnique("archive_toml_");
+	ASSERT_FALSE(dir.empty());
+	const auto path        = dir / "x.toml";
+	const std::string text = "# mine\n[[ global ]]\nv = 'one' # why\n";
+	auto error             = std::string();
+	ASSERT_TRUE(WriteTextAtomically(path, text, &error)) << error;
+	EXPECT_EQ(ReadTextFile(path, &error), text) << error;
+	EXPECT_FALSE(ReadTextFile(dir / "missing.toml", &error));
+	EXPECT_NE(error.find("missing.toml"), std::string::npos);
 	std::error_code ec = {};
 	fs::remove_all(dir, ec);
 }

@@ -2116,14 +2116,44 @@ static void init_dos_settings(SectionProp& section)
 	pint->SetHelp("Most declared uncompressed content an archive may hold, in MiB (4096 by\n"
 	              "default); over it the mount is refused at index time.");
 
-	pstring = section.AddString("archive_sequential", WhenIdle, "refuse");
-	pstring->SetValues({"refuse", "cache"});
+	// 'cache' is the name before 0.86.0 for 'unpack'.
+	pstring = section.AddString("archive_sequential", WhenIdle, "unpack");
+	pstring->SetValues({"unpack", "refuse", "cache"});
 	pstring->SetHelp(
 	        "What to do with archive formats that cannot serve one member without\n"
-	        "unpacking everything before it: 7z, RAR 5, and every tar ('refuse' by\n"
-	        "default). With 'cache' the whole archive is unpacked into the archive\n"
-	        "cache once at mount time and served from there. Solid RAR 4 archives\n"
-	        "are refused either way.");
+	        "unpacking everything before it: 7z, RAR 5, and every tar ('unpack' by\n"
+	        "default). With 'unpack' the whole archive is unpacked into the archive\n"
+	        "cache once at mount time and served from there; 'refuse' does not mount\n"
+	        "it. Archives that can be read in place, such as zip, are never\n"
+	        "unpacked as a whole. Solid RAR 4 archives are refused either way.");
+
+	pbool = section.AddBool("package_conf", WhenIdle, true);
+	pbool->SetHelp(
+	        "Load the DOSBox configuration that a game archive or game folder carries,\n"
+	        "and run its [autoexec] ('on' by default). For the game on the command line\n"
+	        "it loads after the primary and local configuration and before the -conf\n"
+	        "files. An archive mounted later loads it too: what can change while running\n"
+	        "applies at once, and the -conf files and --set still win. A bare MOUNT -run\n"
+	        "runs its whole [autoexec]; without -run, or with -run NAME, only its MOUNT\n"
+	        "lines run. It cannot set the host-only settings: [webserver], host_loopback,\n"
+	        "the port forwards, serial1 to serial4, browser, the settings that name a\n"
+	        "host file or folder, and the archive limits. At start only the primary and\n"
+	        "the local configuration and --set can turn it off; the archive settings\n"
+	        "used to read the package (archive_sequential, archive_cache_path and the\n"
+	        "archive limits) come from the same places.");
+
+	pbool = section.AddBool("unimenu", WhenIdle, true);
+	pbool->SetHelp(
+	        "Start UniMenu, the program menu, on its own ('on' by default): for a game\n"
+	        "archive or game folder whose configuration stops at the C: prompt or has an\n"
+	        "empty [autoexec], and for MOUNT -run when a drive holds several programs.\n"
+	        "With 'off' you land at the prompt. Y:\\DOS\\UNIMENU.EXE can always be started\n"
+	        "by hand and shows the programs of the current drive.");
+
+	pstring = section.AddString("archive_package_conf",
+	                            Property::Changeable::DeprecatedButAllowed,
+	                            "");
+	pstring->SetHelp("Renamed to [color=light-green]'package_conf'.[reset]");
 
 	pstring = section.AddString("ver", WhenIdle, "5.0");
 	pstring->SetHelp(

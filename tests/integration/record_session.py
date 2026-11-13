@@ -93,7 +93,7 @@ def main():
 
     try:
         client.wait_ready(timeout=10)
-        client.wait_shell(timeout=10)
+        client.wait_autoexec_done()
         print("DOSBox ready.")
         print()
         print("Starting recording. Do the install in the DOSBox window.")

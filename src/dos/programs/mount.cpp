@@ -7,18 +7,22 @@
 #include "dos/archive/descriptor.h"
 #include "dos/archive/head_sniff.h"
 #include "dos/archive/member_path.h"
+#include "dos/archive/package_autoexec.h"
 #include "dos/programs/append.h"
 #include "dos/programs/archive_images.h"
 #include "dos/programs/mount_archive_internal.h"
 #include "dos/programs/archive_chooser.h"
 #include "dos/programs/mount_run.h"
 #include "dos/programs/menu_session.h"
+#include "dos/programs/package_runtime.h"
+#include "dos/programs/package_start.h"
 #include "mount_common.h"
 #include "mount_policy.h"
 
 #include "dosbox.h"
 
 #include <algorithm>
+#include <cctype>
 #include <vector>
 
 #include "config/config.h"
@@ -730,6 +734,9 @@ bool MOUNT::ParseArguments(MountParameters& params, bool& explicit_fs,
 		return false;
 	}
 	params.roflag = ro->present;
+	if (ro->present) {
+		params.typed_switches.emplace_back("-ro", std::nullopt);
+	}
 
 	// Parse -fs (filesystem type)
 	// Default is "fat" if the -fs option is not provided
@@ -783,27 +790,42 @@ bool MOUNT::ParseArguments(MountParameters& params, bool& explicit_fs,
 		return false;
 	}
 	params.label = label->value.value_or("");
+	if (label->present) {
+		params.typed_switches.emplace_back("-label", params.label);
+	}
 
 	const auto root = TakeOption("-root", OptionValue::Required);
 	if (!root) {
 		return false;
 	}
 	params.archive_root  = root->value.value_or("");
+	if (root->present) {
+		params.typed_switches.emplace_back("-root", params.archive_root);
+	}
 	const auto nosidecar = TakeOption("-nosidecar", OptionValue::None);
 	if (!nosidecar) {
 		return false;
 	}
 	params.no_sidecar = nosidecar->present;
+	if (nosidecar->present) {
+		params.typed_switches.emplace_back("-nosidecar", std::nullopt);
+	}
 	const auto sidecar = TakeOption("-sidecar", OptionValue::Required);
 	if (!sidecar) {
 		return false;
 	}
 	params.sidecar_path = sidecar->value.value_or("");
+	if (sidecar->present) {
+		params.typed_switches.emplace_back("-sidecar", std::string());
+	}
 	const auto scratch = TakeOption("-scratch", OptionValue::None);
 	if (!scratch) {
 		return false;
 	}
 	params.scratch = scratch->present;
+	if (scratch->present) {
+		params.typed_switches.emplace_back("-scratch", std::nullopt);
+	}
 	if (params.scratch &&
 	    (params.roflag || params.no_sidecar || !params.sidecar_path.empty())) {
 		NOTIFY_DisplayWarning(Notification::Source::Console,
@@ -1111,6 +1133,79 @@ std::string MOUNT::ApplyRelativePath(const std::string& path,
 
 // Translates a DOS path to a host path if the DOS path is currently mapped as a
 // drive. Returns an empty string if it cannot be translated.
+namespace {
+
+// A file on an archive drive: the sidecar's copy when the game wrote one,
+// else the member as a chain path (MOUNT and IMGMOUNT read it from there).
+std::string ArchiveMemberPath(const std::shared_ptr<DOS_Drive>& drive,
+                              const ArchiveDrive& archive, const char* dos_name)
+{
+	if (const auto layered = std::dynamic_pointer_cast<UnionDrive>(drive)) {
+		if (auto copy = layered->HostPathOf(dos_name); !copy.empty()) {
+			return copy;
+		}
+	}
+	const auto* node = archive.Tree().Find(dos_name);
+	if (!node || node->is_dir || node->entry_index < 0) {
+		return "";
+	}
+	const auto& entry = archive.Source().Entries().at(
+	        static_cast<size_t>(node->entry_index));
+	const auto host = ArchiveMount::PathFromUtf8(archive.SourcePath());
+	if (!host) {
+		return "";
+	}
+	return ArchiveMount::PathToUtf8(
+	        ArchiveMount::PathWithChain(*host, entry.utf8_path));
+}
+
+// A line the pending batch expands: its percent signs go through as written.
+std::string DoubledPercent(const std::string& text)
+{
+	std::string out = {};
+	for (const char c : text) {
+		out += c;
+		if (c == '%') {
+			out += '%';
+		}
+	}
+	return out;
+}
+
+// The typed archive switches as MOUNT text for the remount; none when a value
+// cannot travel inside quotes.
+std::optional<std::string> TypedSwitchText(const MountParameters& params)
+{
+	std::string text = {};
+	for (const auto& [name, typed] : params.typed_switches) {
+		text += " " + name;
+		if (!typed) {
+			continue;
+		}
+		const auto& value = name == "-sidecar" ? params.sidecar_path : *typed;
+		const auto unfit  = std::any_of(value.begin(), value.end(), [](const char c) {
+			const auto byte = static_cast<uint8_t>(c);
+			return c == '"' || byte < 0x20 || byte == 0x7f;
+		});
+		if (unfit) {
+			return {};
+		}
+		text += " \"" + DoubledPercent(value) + "\"";
+	}
+	return text;
+}
+
+// A member's chain path never exists as a host file.
+bool IsOnArchiveDrive(const std::string& dos_path)
+{
+	auto fullname_buf = std::array<char, CROSS_LEN>{};
+	uint8_t drive_idx = 0;
+	return DOS_MakeName(dos_path.data(), fullname_buf.data(), &drive_idx) &&
+	       ArchiveDriveOf(Drives.at(drive_idx)) != nullptr;
+}
+
+} // namespace
+
 std::string MOUNT::GetDosMappedHostPath(const std::string& dos_path)
 {
 	// DOS_MakeName requires a writable buffer
@@ -1128,6 +1223,11 @@ std::string MOUNT::GetDosMappedHostPath(const std::string& dos_path)
 				return local_drive->MapDosToHostFilename(
 				        fullname_buf.data());
 			}
+		}
+		if (const auto archive = ArchiveDriveOf(Drives.at(drive_idx))) {
+			return ArchiveMemberPath(Drives.at(drive_idx),
+			                         *archive,
+			                         fullname_buf.data());
 		}
 	}
 
@@ -1167,7 +1267,8 @@ std::string MOUNT::HostPathOfDosPath(const std::string& dos_path)
 	for (const auto& reading : {dos_path, MountPolicy::HostPathFromDos(dos_path)}) {
 		const auto mapped = GetDosMappedHostPath(reading);
 		struct stat test  = {};
-		if (!mapped.empty() && stat(mapped.c_str(), &test) == 0) {
+		if (!mapped.empty() && (stat(mapped.c_str(), &test) == 0 ||
+		                        IsOnArchiveDrive(reading))) {
 			return mapped;
 		}
 	}
@@ -1197,7 +1298,9 @@ void MOUNT::ReportMountDenied(const std::string& path, const MountVerdict& verdi
 	            detail.empty() ? "" : ": ",
 	            detail.c_str());
 	const std::string message_id = MountPolicy::DenyMessageId(verdict.reason);
-	if (message_id == "PROGRAM_MOUNT_POLICY_REFUSED") {
+	if (message_id == "PROGRAM_MOUNT_POLICY_REFUSED" ||
+	    message_id == "PROGRAM_MOUNT_POLICY_REFUSED_FILE" ||
+	    message_id == "PROGRAM_MOUNT_POLICY_SYSTEM") {
 		NOTIFY_DisplayWarning(Notification::Source::Console,
 		                      "MOUNT",
 		                      message_id,
@@ -1402,6 +1505,16 @@ void MOUNT::ProcessPaths(const std::string first_path, MountParameters& params,
 			cur_arg = ApplyRelativePath(
 			        resolve_home(HostText(cur_arg)).string(),
 			        path_relative_to_last_config);
+			// A file on an archive drive goes on as its member
+			// chain path; a host file of that name wins, as in
+			// ResolveHostPath.
+			if (path_text == PathText::Dos && IsOnArchiveDrive(typed) &&
+			    !local_drive_path_exists(cur_arg.c_str())) {
+				if (const auto mapped = HostPathOfDosPath(typed);
+				    !mapped.empty()) {
+					cur_arg = mapped;
+				}
+			}
 
 			if (const auto lone = ArchiveMount::LoneImageMember(cur_arg)) {
 				if (!AddArchiveMember(*lone,
@@ -1442,8 +1555,11 @@ void MOUNT::ProcessPaths(const std::string first_path, MountParameters& params,
 				return;
 			}
 
-			// Resolve virtual drive letters to host paths first
-			const auto mapped_path = GetDosMappedHostPath(cur_arg);
+			// A host file of that name wins over its DOS reading,
+			// as in ResolveHostPath.
+			const auto on_host = local_drive_path_exists(cur_arg.c_str());
+			const auto mapped_path    = on_host ? std::string()
+			                                    : GetDosMappedHostPath(cur_arg);
 			const auto path_to_expand = mapped_path.empty()
 			                                  ? cur_arg
 			                                  : mapped_path;
@@ -1964,6 +2080,14 @@ std::optional<MountParameters> MOUNT::ProcessArguments(CommandLine* cmd,
 	// Get the first path argument
 	std::string first_path = {};
 	if (!cmd->FindCommand(2, first_path) || first_path.empty()) {
+		// -run without a path runs on a drive already mounted, such as
+		// the drives a package's own MOUNT lines set up (ada-0lv8)
+		if (params.run && RunOnMountedDrive(params)) {
+			return params;
+		}
+		if (params.run && params.drive) {
+			return {};
+		}
 		ShowUsage();
 		return {};
 	}
@@ -2002,6 +2126,9 @@ std::optional<MountParameters> MOUNT::ProcessArguments(CommandLine* cmd,
 		return {};
 	}
 
+	if (QueuePackage(params)) {
+		return params;
+	}
 	if (params.run) {
 		QueueRun(params);
 	}
@@ -2009,16 +2136,179 @@ std::optional<MountParameters> MOUNT::ProcessArguments(CommandLine* cmd,
 	return params;
 }
 
+namespace {
+
+MountRun::Texts RunTexts()
+{
+	return {
+	        MSG_Get("PROGRAM_MOUNT_RUN_BAD_NAME"),
+	        MSG_Get("PROGRAM_MOUNT_RUN_NOT_FOUND"),
+	        MSG_Get("PROGRAM_MOUNT_RUN_NOT_A_PROGRAM"),
+	        MSG_Get("PROGRAM_MOUNT_RUN_NO_PROGRAM"),
+	        MSG_Get("PROGRAM_MOUNT_RUN_SEVERAL_PROGRAMS"),
+	        MSG_Get("PROGRAM_MOUNT_RUN_NO_DRIVE"),
+	        MSG_Get("PROGRAM_MOUNT_RUN_CANDIDATES"),
+	};
+}
+
+} // namespace
+
+// True when the program was handed to QueueRun; params.drive is set for a
+// drive letter that is not mounted, after -run's own refusal.
+bool MOUNT::RunOnMountedDrive(MountParameters& params)
+{
+	std::string letter = {};
+	if (!cmd->FindCommand(1, letter)) {
+		return false;
+	}
+	if (letter.size() == 2 && letter[1] == ':') {
+		letter.pop_back();
+	}
+	if (letter.size() != 1 ||
+	    !std::isalpha(static_cast<unsigned char>(letter[0]))) {
+		return false;
+	}
+	params.drive = static_cast<char>(
+	        std::toupper(static_cast<unsigned char>(letter[0])));
+	if (!Drives.at(drive_index(params.drive))) {
+		MountRun::Target target = {};
+		target.refusal          = MountRun::Refusal::NoDrive;
+		WriteOut_NoParsing(MountRun::Describe(
+		        target, *params.run, params.drive, RunTexts()));
+		return false;
+	}
+	QueueRun(params);
+	return true;
+}
+
+// The archive's package conf (ada-nb2a): its settings now, and in place of
+// -run's own lines its MOUNT lines, or under -run without a name its whole
+// [autoexec]. True when that took the place of QueueRun.
+bool MOUNT::QueuePackage(const MountParameters& params)
+{
+	if (!params.mounted_archive || !PackageStart::PackageConfEnabled()) {
+		return false;
+	}
+	const auto archive = *params.mounted_archive;
+	if (PackageRuntime::IsActive(archive)) {
+		return false;
+	}
+	const auto package = PackageStart::ReadPackage(archive,
+	                                               PackageStart::ProfileOrder());
+	if (!package) {
+		return false;
+	}
+	// Its settings apply only when its lines can run
+	if (SHELL_PendingCommandsWaiting()) {
+		WriteOut(MSG_Get("PROGRAM_MOUNT_RUN_BUSY"));
+		return true;
+	}
+	const auto named_run = params.run && !params.run->empty();
+	const auto switches  = TypedSwitchText(params);
+	if (named_run && !switches) {
+		WriteOut(MSG_Get("PROGRAM_MOUNT_RUN_SWITCH_UNFIT"));
+		return true;
+	}
+	const auto whole = params.run && params.run->empty();
+	auto result      = PackageRuntime::Apply(*control, *package, !whole);
+	if (!result.start_only.empty()) {
+		std::string names = {};
+		for (const auto& name : result.start_only) {
+			names += (names.empty() ? "" : ", ") + name;
+		}
+		WriteOut(MSG_Get("PROGRAM_MOUNT_PACKAGE_START_ONLY"), names.c_str());
+	}
+	if (result.lines.empty()) {
+		return false;
+	}
+	// The package's text and host paths are UTF-8; the batch reader runs DOS
+	// bytes, as AUTOEXEC.BAT does
+	const auto to_dos = [](const std::string& line) {
+		return utf8_to_dos(line,
+		                   DosStringConvertMode::WithControlCodes,
+		                   UnicodeFallback::Box,
+		                   get_utf8_code_page());
+	};
+	auto mounts_this_letter = false;
+	std::vector<std::string> lines = {};
+	// A package that mounts no drive runs on the one this MOUNT made, as at
+	// start, where its lines precede the generated MOUNT C -run
+	if (!result.mounts_drive) {
+		lines.emplace_back(std::string{params.drive, ':'});
+	}
+	for (const auto& line : result.lines) {
+		mounts_this_letter |= (PackageAutoexec::MountLetter(line) == params.drive);
+		lines.push_back(to_dos(line));
+	}
+	// As --run at the command line: NAME on the package's C:, or on this
+	// letter when the package mounts it, else on the archive mounted again.
+	const auto exit_switch = std::string(params.run_exit ? " -exit" : "");
+	if (params.run && !params.run->empty() && result.mounts_drive) {
+		const auto name = DoubledPercent(*params.run);
+		if (result.mounts_c || mounts_this_letter) {
+			const auto letter = result.mounts_c ? 'C' : params.drive;
+			lines.push_back(to_dos(std::string("MOUNT ") + letter +
+			                       " -run " + name + exit_switch));
+		} else {
+			lines.push_back(to_dos(std::string("MOUNT ") + params.drive + " \"" +
+			                       DoubledPercent(ArchiveMount::PathToUtf8(archive)) +
+			                       "\"" + switches.value_or("") + " -run " +
+			                       name + exit_switch));
+		}
+	} else {
+		auto resolved = true;
+		if (params.run && !params.run->empty()) {
+			const auto target = MountRun::Resolve(params.drive, *params.run);
+			resolved          = !target.lines.empty();
+			if (!resolved) {
+				WriteOut_NoParsing(MountRun::Describe(target,
+				                                      *params.run,
+				                                      params.drive,
+				                                      RunTexts()));
+			}
+			// The batch reader expands '%', so each percent sign is doubled.
+			for (const auto& line : target.lines) {
+				lines.push_back(DoubledPercent(line));
+			}
+		}
+		if (whole && !result.mounts_drive) {
+			lines.push_back(std::string("MOUNT ") + params.drive + " -run" + exit_switch);
+		} else if (params.run_exit && resolved) {
+			lines.emplace_back("EXIT");
+		}
+	}
+	PackageRuntime::MarkActive(archive);
+	if (!SHELL_QueuePendingBatch(std::move(lines), [archive] {
+		    PackageRuntime::Release(archive);
+	    })) {
+		PackageRuntime::Release(archive);
+		WriteOut(MSG_Get("PROGRAM_MOUNT_RUN_BUSY"));
+		return true;
+	}
+	// The package's own drives win over the letter this MOUNT used.
+	if (result.mounts_drive) {
+		const auto unmounted = UnmountHelper(params.drive);
+		if (unmounted == MSG_Get("PROGRAM_MOUNT_UMOUNT_SUCCESS")) {
+			WriteOut(MSG_Get("PROGRAM_MOUNT_PACKAGE_OWN_DRIVES"), params.drive);
+		} else {
+			WriteOut(unmounted.c_str(), params.drive);
+		}
+	}
+	return true;
+}
+
 // Decision 4 (Stefan 2026-10-05): a name that does not resolve leaves the
 // mount standing and runs nothing.
 void MOUNT::QueueRun(const MountParameters& params)
 {
 	// The EXIT of -exit follows the chosen program, so a cancelled menu
-	// leaves the engine standing
-	// Without the bundled UniMenu a menu falls back to -run's own refusal
+	// leaves the engine standing; without the bundled UniMenu a menu falls
+	// back to -run's refusal, and [dos] unimenu = off stops only the menu.
 	const auto queue_menu = [&](ArchiveChooser::Menu menu) {
+		const auto menu_allowed = MenuSession::AutoLaunchEnabled() &&
+		                          MenuSession::MenuProgramAvailable();
 		const auto autostart = menu.autostart;
-		if (!autostart && !MenuSession::MenuProgramAvailable()) {
+		if (!autostart && !menu_allowed) {
 			return false;
 		}
 		MenuSession::Open(params.drive,
@@ -2027,7 +2317,7 @@ void MOUNT::QueueRun(const MountParameters& params)
 		if (autostart && MenuSession::Choose(*autostart)) {
 			return true;
 		}
-		if (!MenuSession::MenuProgramAvailable()) {
+		if (!menu_allowed) {
 			MenuSession::Close();
 			return false;
 		}
@@ -2083,17 +2373,8 @@ void MOUNT::QueueRun(const MountParameters& params)
 		target = MountRun::Resolve(params.drive, name);
 	}
 	if (target.lines.empty()) {
-		const MountRun::Texts texts = {
-		        MSG_Get("PROGRAM_MOUNT_RUN_BAD_NAME"),
-		        MSG_Get("PROGRAM_MOUNT_RUN_NOT_FOUND"),
-		        MSG_Get("PROGRAM_MOUNT_RUN_NOT_A_PROGRAM"),
-		        MSG_Get("PROGRAM_MOUNT_RUN_NO_PROGRAM"),
-		        MSG_Get("PROGRAM_MOUNT_RUN_SEVERAL_PROGRAMS"),
-		        MSG_Get("PROGRAM_MOUNT_RUN_NO_DRIVE"),
-		        MSG_Get("PROGRAM_MOUNT_RUN_CANDIDATES"),
-		};
 		WriteOut_NoParsing(
-		        MountRun::Describe(target, name, params.drive, texts));
+		        MountRun::Describe(target, name, params.drive, RunTexts()));
 		return;
 	}
 	if (params.run_exit) {
@@ -2103,6 +2384,83 @@ void MOUNT::QueueRun(const MountParameters& params)
 		WriteOut(MSG_Get("PROGRAM_MOUNT_RUN_BUSY"));
 	}
 }
+
+const char* const MOUNT::HelpLongText =
+        "Mount a directory or an image file to a drive letter.\n"
+        "\n"
+        "Usage:\n"
+        "  [color=light-green]mount[reset] [color=white]DRIVE[reset] [color=light-cyan]PATH[reset] [PARAMETERS]\n"
+        "  [color=light-green]mount[reset] [color=white]DRIVE[reset] [color=light-cyan]IMAGEFILE[reset] [IMAGEFILE2...] [PARAMETERS]\n"
+        "  [color=light-green]mount[reset] [color=white]DRIVE[reset] [color=light-cyan]IMAGE-SET[reset] [PARAMETERS]\n"
+        "  [color=light-green]mount[reset] -u [color=white]DRIVE[reset]  (unmounts [color=white]DRIVE[reset])\n"
+        "\n"
+        "Common parameters:\n"
+        "  [color=white]DRIVE[reset]           drive letter (A-Z) to mount to\n"
+        "  [color=light-cyan]PATH[reset]            directory on the host OS (absolute or relative path)\n"
+        "  [color=light-cyan]IMAGEFILE[reset]       image file on the host OS (absolute or relative path) or on a\n"
+        "                  mounted DOS drive (e.g. C:\\GAME.ISO)\n"
+        "  [color=light-cyan]IMAGE-SET[reset]       ISO, CUE+BIN, CUE+ISO, or CUE+ISO+FLAC/OPUS/OGG/MP3/WAV\n"
+        "\n"
+        "  -t [color=white]TYPE[reset]         type of mount: [color=light-cyan]dir[reset], [color=light-cyan]overlay[reset], [color=light-cyan]floppy[reset], [color=light-cyan]hdd[reset], [color=light-cyan]iso[reset] (or [color=light-cyan]cdrom[reset])\n"
+        "  -fs [color=white]FS[reset]          filesystem: [color=light-cyan]fat[reset], [color=light-cyan]iso[reset], or [color=light-cyan]none[reset] (for bootable images)\n"
+        "  -label [color=white]LABEL[reset]    volume label to assign to the mounted drive\n"
+        "  -ro             mount as read-only\n"
+        "  -t [color=light-cyan]archive[reset]      mounts a zip, rar, 7z or tar archive (also detected by\n"
+        "                  extension); the archive stays as it is, writes go to a\n"
+        "                  sidecar. An image inside an archive is named through it:\n"
+        "                  game.zip/disks/disk1.img\n"
+        "                  A compressed single image mounts as that image:\n"
+        "                  disk1.img.xz, game.imz, game.isz\n"
+        "  -root [color=white]DIR[reset]       directory inside the archive to use as the drive's root\n"
+        "  -sidecar [color=white]PATH[reset]   archive mounts: directory for the game's writes\n"
+        "                  (default: saves)\n"
+        "  -nosidecar      archive mounts: no sidecar, the drive is read-only\n"
+        "  -scratch        archive mounts: keep the writes for this mount only,\n"
+        "                  discarded at unmount (installer media)\n"
+        "  -run [color=white]NAME[reset]       run NAME from the new drive once MOUNT is done; without\n"
+        "                  NAME, its one program, or a menu when there are several;\n"
+        "                  without a path, from a drive that is already mounted\n"
+        "  -exit           with -run: leave DOSBox when the program ends\n"
+        "  -reconnect [color=white]DRIVE[reset] reopen an archive mount that reports lost or offline\n"
+        "  -cache          show the archive cache: size, cap, free space and entries\n"
+        "  -cache trim     remove expired entries and trim the cache to its cap\n"
+        "\n"
+        "Directory mount parameters:\n"
+        "  -freesize [color=white]SIZE[reset]  size (in KB for floppies, in MB for hard disks); sets the\n"
+        "                  amount of free space available on the drive (~250 MB by\n"
+        "                  default for HDD directory mounts)\n"
+        "  -t [color=light-cyan]overlay[reset]      mounts the directory as an overlay on top of an existing drive\n"
+        "\n"
+        "Image parameters:\n"
+        "  -chs [color=white]C,H,S[reset]      specify geometry ([color=white]C[reset]ylinders,[color=white]H[reset]eads,[color=white]S[reset]ectors) for HDD images\n"
+        "  -size [color=white]B,S,H,C[reset]   specify geometry ([color=white]B[reset]ytesPerSector,[color=white]S[reset]ectors,[color=white]H[reset]eads,[color=white]C[reset]ylinders);\n"
+        "                  alternative to -chs for HDD images\n"
+        "  -ide            attach as IDE device (for CD-ROM and HDD images)\n"
+        "  -pr             path is relative to the configuration file location\n"
+        "\n"
+        "Notes:\n"
+        "  - Use wildcards or multiple image files to mount them at the same drive\n"
+        "    letter, then press [color=yellow]%s+F4[reset] to cycle between them. This is useful for\n"
+        "    programs that require swapping disks while running.\n"
+        "\n"
+        "  - The -ide flag emulates an IDE controller for an attached HDD or CD drive\n"
+        "    for CD-based games that need a real DOS environment via a bootable HDD\n"
+        "    image.\n"
+        "\n"
+        "  - Type [color=light-cyan]overlay[reset] requires [color=white]DRIVE[reset] to be already mounted. It mounts [color=light-cyan]PATH[reset] on the\n"
+        "    host OS as a write-layer over the drive. Modified files are stored in [color=light-cyan]PATH[reset],\n"
+        "    leaving the original drive data unchanged.\n"
+        "\n"
+        "  - An archive mount never changes the archive. Writes land in a sidecar\n"
+        "    directory under the saves directory; delete it to reset the game.\n"
+        "    Formats that cannot serve one member without unpacking everything\n"
+        "    (7z, RAR 5, tar) are unpacked into the archive cache once; set\n"
+        "    archive_sequential = refuse to keep them out.\n"
+        "\n"
+        "  - A floppy or hard-disk image taken from an archive is copied once into\n"
+        "    the game's sidecar and written there; -ro or -nosidecar use the cache.\n"
+        "\n"
+        "Examples:\n";
 
 const char* const MOUNT::ArchiveUnsupportedMessage =
         "%s\n"
@@ -2123,6 +2481,18 @@ const std::vector<std::pair<std::string, std::string>>& MOUNT::RefusalTexts()
 	         "Put a dosbox-automation.conf next to the game and start with -conf,\n"
 	         "or add the path to mount_allowed_bases in the primary config.\n"
 	         "The security page of the manual explains the policy.\n"},
+	        {"PROGRAM_MOUNT_POLICY_REFUSED_FILE",
+	         "%s\n"
+	         "was refused by the mount policy: %s.\n"
+	         "Put a dosbox-automation.conf next to the game and start with -conf,\n"
+	         "or add its folder to mount_allowed_image_roots in the primary config.\n"
+	         "The security page of the manual explains the policy.\n"},
+	        {"PROGRAM_MOUNT_POLICY_SYSTEM",
+	         "%s\n"
+	         "was refused by the mount policy: %s.\n"
+	         "System folders and device names are never mounted, whatever the\n"
+	         "configuration says. Copy what the game needs into a folder of its own.\n"
+	         "The security page of the manual explains the policy.\n"},
 	        {"PROGRAM_MOUNT_POLICY_SYMLINK",
 	         "%s\n"
 	         "was refused by the mount policy: a link is in the path.\n"
@@ -2133,7 +2503,7 @@ const std::vector<std::pair<std::string, std::string>>& MOUNT::RefusalTexts()
 	         "%s\n"
 	         "is a sequential archive (%s): reaching any member unpacks\n"
 	         "everything before it. To unpack it into the archive cache once at\n"
-	         "mount time, set archive_sequential = cache in the [dos] section, or\n"
+	         "mount time, set archive_sequential = unpack in the [dos] section, or\n"
 	         "repack it as a zip.\n"},
 	        {"PROGRAM_MOUNT_ARCHIVE_CACHE",
 	         "%s\n"
@@ -2164,79 +2534,7 @@ void MOUNT::AddMessages()
 	MSG_Add("PROGRAM_MOUNT_HELP",
 	        "Mount a directory or an image file to a drive letter.\n");
 
-	MSG_Add("PROGRAM_MOUNT_HELP_LONG",
-	        "Mount a directory or an image file to a drive letter.\n"
-	        "\n"
-	        "Usage:\n"
-	        "  [color=light-green]mount[reset] [color=white]DRIVE[reset] [color=light-cyan]PATH[reset] [PARAMETERS]\n"
-	        "  [color=light-green]mount[reset] [color=white]DRIVE[reset] [color=light-cyan]IMAGEFILE[reset] [IMAGEFILE2...] [PARAMETERS]\n"
-	        "  [color=light-green]mount[reset] [color=white]DRIVE[reset] [color=light-cyan]IMAGE-SET[reset] [PARAMETERS]\n"
-	        "  [color=light-green]mount[reset] -u [color=white]DRIVE[reset]  (unmounts [color=white]DRIVE[reset])\n"
-	        "\n"
-	        "Common parameters:\n"
-	        "  [color=white]DRIVE[reset]           drive letter (A-Z) to mount to\n"
-	        "  [color=light-cyan]PATH[reset]            directory on the host OS (absolute or relative path)\n"
-	        "  [color=light-cyan]IMAGEFILE[reset]       image file on the host OS (absolute or relative path) or on a\n"
-	        "                  mounted DOS drive (e.g. C:\\GAME.ISO)\n"
-	        "  [color=light-cyan]IMAGE-SET[reset]       ISO, CUE+BIN, CUE+ISO, or CUE+ISO+FLAC/OPUS/OGG/MP3/WAV\n"
-	        "\n"
-	        "  -t [color=white]TYPE[reset]         type of mount: [color=light-cyan]dir[reset], [color=light-cyan]overlay[reset], [color=light-cyan]floppy[reset], [color=light-cyan]hdd[reset], [color=light-cyan]iso[reset] (or [color=light-cyan]cdrom[reset])\n"
-	        "  -fs [color=white]FS[reset]          filesystem: [color=light-cyan]fat[reset], [color=light-cyan]iso[reset], or [color=light-cyan]none[reset] (for bootable images)\n"
-	        "  -label [color=white]LABEL[reset]    volume label to assign to the mounted drive\n"
-	        "  -ro             mount as read-only\n"
-	        "  -t [color=light-cyan]archive[reset]      mounts a zip, rar, 7z or tar archive (also detected by\n"
-	        "                  extension); the archive stays as it is, writes go to a sidecar\n"
-	        "                  An image inside an archive is named through it:\n"
-	        "                  game.zip/disks/disk1.img\n"
-	        "                  A compressed single image mounts as that image:\n"
-	        "                  disk1.img.xz, game.imz, game.isz\n"
-	        "  -root [color=white]DIR[reset]       directory inside the archive to use as the drive's root\n"
-	        "  -sidecar [color=white]PATH[reset]  archive mounts: directory for the game's writes (default: saves)\n"
-	        "  -nosidecar      archive mounts: no sidecar, the drive is read-only\n"
-	        "  -scratch        archive mounts: keep the writes for this mount only,\n"
-	        "                  discarded at unmount (installer media)\n"
-	        "  -run [color=white]NAME[reset]       run NAME from the new drive once MOUNT is done; without\n"
-	        "                  NAME, its one program, or a menu when there are several\n"
-	        "  -exit           with -run: leave DOSBox when the program ends\n"
-	        "  -reconnect [color=white]DRIVE[reset] reopen an archive mount that reports lost or offline\n"
-	        "  -cache          show the archive cache: size, cap, free space and entries\n"
-	        "  -cache trim     remove expired entries and trim the cache to its cap\n"
-	        "\n"
-	        "Directory mount parameters:\n"
-	        "  -freesize [color=white]SIZE[reset]  size (in KB for floppies, in MB for hard disks); sets the\n"
-	        "                  amount of free space available on the drive (~250 MB by\n"
-	        "                  default for HDD directory mounts)\n"
-	        "  -t [color=light-cyan]overlay[reset]      mounts the directory as an overlay on top of an existing drive\n"
-	        "\n"
-	        "Image parameters:\n"
-	        "  -chs [color=white]C,H,S[reset]      specify geometry ([color=white]C[reset]ylinders,[color=white]H[reset]eads,[color=white]S[reset]ectors) for HDD images\n"
-	        "  -size [color=white]B,S,H,C[reset]   specify geometry ([color=white]B[reset]ytesPerSector,[color=white]S[reset]ectors,[color=white]H[reset]eads,[color=white]C[reset]ylinders);\n"
-	        "                  alternative to -chs for HDD images\n"
-	        "  -ide            attach as IDE device (for CD-ROM and HDD images)\n"
-	        "  -pr             path is relative to the configuration file location\n"
-	        "\n"
-	        "Notes:\n"
-	        "  - Use wildcards or multiple image files to mount them at the same drive\n"
-	        "    letter, then press [color=yellow]%s+F4[reset] to cycle between them. This is useful for\n"
-	        "    programs that require swapping disks while running.\n"
-	        "\n"
-	        "  - The -ide flag emulates an IDE controller for an attached HDD or CD drive\n"
-	        "    for CD-based games that need a real DOS environment via a bootable HDD\n"
-	        "    image.\n"
-	        "\n"
-	        "  - Type [color=light-cyan]overlay[reset] requires [color=white]DRIVE[reset] to be already mounted. It mounts [color=light-cyan]PATH[reset] on the\n"
-	        "    host OS as a write-layer over the drive. Modified files are stored in [color=light-cyan]PATH[reset],\n"
-	        "    leaving the original drive data unchanged.\n"
-	        "\n"
-	        "  - An archive mount never changes the archive. Writes land in a sidecar\n"
-	        "    directory under the saves directory; delete it to reset the game.\n"
-	        "    Formats that cannot serve one member without unpacking everything\n"
-	        "    (7z, RAR 5, tar) are refused unless archive_sequential = cache is set.\n"
-	        "\n"
-	        "  - A floppy or hard-disk image taken from an archive is copied once into\n"
-	        "    the game's sidecar and written there; -ro or -nosidecar use the cache.\n"
-	        "\n"
-	        "Examples:\n");
+	MSG_Add("PROGRAM_MOUNT_HELP_LONG", HelpLongText);
 
 	MSG_Add("PROGRAM_MOUNT_HELP_LONG_WIN32",
 	        "  [color=light-green]mount[reset] [color=white]C[reset] [color=light-cyan]C:\\dosgames[reset]\n"
@@ -2281,6 +2579,12 @@ void MOUNT::AddMessages()
 	}
 
 	MSG_Add("PROGRAM_MOUNT_ARCHIVE_IDENTIFYING", "MOUNT: identifying %s ...\n");
+	MSG_Add("PROGRAM_MOUNT_ARCHIVE_UNPACKING",
+	        "%s\n"
+	        "cannot be read in place: unpacking it into the archive cache.\n");
+	MSG_Add("PROGRAM_MOUNT_ARCHIVE_DRIVES_LAYOUT",
+	        "This archive holds a drives/ folder, DOSBox Staging's automount layout, which\n"
+	        "is not supported. Mount its drives with MOUNT lines, or with -root drives/c.\n");
 	MSG_Add("PROGRAM_MOUNT_ARCHIVE_ROOT_USED",
 	        "Using %s as the root of the archive.\n");
 	MSG_Add("PROGRAM_MOUNT_ARCHIVE_ENTERED",
@@ -2328,6 +2632,15 @@ void MOUNT::AddMessages()
 	MSG_Add("PROGRAM_MOUNT_RUN_CANDIDATES", run_texts.candidates);
 	MSG_Add("PROGRAM_MOUNT_RUN_BUSY",
 	        "Another program is already waiting to run; this MOUNT queued nothing.\n");
+	MSG_Add("PROGRAM_MOUNT_RUN_SWITCH_UNFIT",
+	        "A switch value holds a quote or a control character and cannot go on\n"
+	        "to the program; this MOUNT queued nothing.\n");
+	MSG_Add("PROGRAM_MOUNT_PACKAGE_OWN_DRIVES",
+	        "The game's configuration mounts its own drives; drive %c is given back.\n");
+	MSG_Add("PROGRAM_MOUNT_PACKAGE_START_ONLY",
+	        "These settings from the game's configuration only apply at start:\n"
+	        "  %s\n"
+	        "Start the game from the command line to use them.\n");
 	MSG_Add("PROGRAM_MOUNT_RUN_NEEDS_LETTER",
 	        "-run needs a drive letter; it cannot be used with -fs none.\n");
 	MSG_Add("PROGRAM_MOUNT_EXIT_NEEDS_RUN",

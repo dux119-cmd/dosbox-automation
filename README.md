@@ -16,7 +16,7 @@ dosbox-automation
 </h3>
 
 <p align="center">
-  A safer DOSBox, originally based on DOSBox Staging, with an HTTP REST API, sandbox Lua scripting, frame-accurate input recording, and games that run straight from their zip files - for gamers, game recordings, game launchers, AI agents, and CI pipelines alike.
+  A safer DOSBox, originally based on DOSBox Staging, with an HTTP REST API, sandboxed Lua scripting, frame-accurate input recording, and games that run straight from their zip files - for gamers, game recordings, game launchers, AI agents, and CI pipelines alike.
 </p>
 
 <p align="center">
@@ -24,7 +24,7 @@ dosbox-automation
   <a href="https://github.com/dosbox-automation/dosbox-automation/releases">Downloads</a>&ensp;|&ensp;
   <a href="https://www.dosbox-automation.org/">Documentation</a>&ensp;|&ensp;
   <a href="https://github.com/dosbox-automation/dosbox-mcp">dosbox-mcp</a>&ensp;|&ensp;
-  <a href="https://www.dosbox-automation.org/0.85.1/automation/security/">Security</a>
+  <a href="https://www.dosbox-automation.org/0.86.0/automation/security/">Security</a>
 </p>
 
 ---
@@ -49,7 +49,7 @@ Download from the [releases page](https://github.com/dosbox-automation/dosbox-au
 
 With a build from the current sources you can also hand it a game archive directly: `dosbox-automation "Commander Keen 4.zip"` mounts the zip as drive C: and starts the game. See [Games straight from their archives](#games-straight-from-their-archives) below.
 
-To use the API, add `webserver_enabled = true` to the `[webserver]` section in your config. The Swagger UI is then at `http://localhost:8386` with every endpoint documented and testable.
+To drive it from a script or an agent, see [Automate your DOS](#automate-your-dos) below.
 
 The [project manual](https://www.dosbox-automation.org/) has the rest.
 
@@ -125,11 +125,11 @@ dosbox-automation runs DOS games with good defaults for graphics and sound. The 
 
 **Better sound:** dosbox-automation includes the FluidR3 soundfont. General MIDI games sound right on the first run. Sound Blaster 16, AdLib, Gravis UltraSound and MT-32 emulation are included, as well as the traditional PC beeper for old games.
 
-**CRT shaders:** A combination of shaders simulate the look of old CRT monitors of yesteryear. The right shader settings for each graphics mode are picked automatically across CGA, EGA, VGA, SVGA, Tandy, and Hercules, with correct aspect ratios and integer scaling.
+**CRT shaders:** A combination of shaders simulates the look of old CRT monitors. The right shader settings for each graphics mode are picked automatically across CGA, EGA, VGA, SVGA, Tandy, and Hercules, with correct aspect ratios and integer scaling.
 
 **Sharp text with TrueType:** For long sessions in text mode, `ttf_output = true` draws the DOS screen with a scalable TrueType font instead of scaling up the 8x16 bitmap font. The bundled font is VileR's Flexi IBM VGA, which keeps the look of the VGA text mode and covers around 75 DOS code pages; any monospace font with the needed glyphs works too. Programs that load their own screen font keep it, because the output steps aside while the font is changed. FeralChild64 wrote the feature and tells the whole story, with pictures, in [TrueType text output for dosbox-automation](https://feralchild64.github.io/Articles/2026.10.21%20-%20TrueType%20text%20output%20for%20dosbox-automation.html). It is in the current sources and comes with the next release.
 
-**A DOS that behaves like DOS:** APPEND works as it did on MS-DOS, `/X` and `/PATH` included, so the games and tools of the time that look for their data through it find it. SUBST and JOIN work too. The Y: drive carries a set of tools on the path: EDIT (Mateusz Viste's MSEDIT), our own VIEW for reading a file of any size as text or hex, down to an 8086 with DOS 2.0, plus FIND, SORT, XCOPY, DELTREE, DEBUG, ZIP and UNZIP.
+**A DOS that behaves like DOS:** APPEND works as it did on MS-DOS, `/X` and `/PATH` included, so the games and tools of the time that look for their data through it find it. SUBST works too. The Y: drive carries a set of tools on the path: EDIT (Mateusz Viste's MSEDIT), our own VIEW for reading a file of any size as text or hex, down to an 8086 with DOS 2.0, plus FIND, SORT, XCOPY, DELTREE, DEBUG, ZIP and UNZIP.
 
 **Video and image capture:** You can record your gameplay with CTRL+F7, dosboxctl (included helper script in source distribution) or programmatic API calls, either in the original screen resolution or as they are rendered on screen.  
 
@@ -171,7 +171,7 @@ ZIP, RAR, 7z and tar archives mount, and an archive inside an archive is reached
 
 The game can still write. Saved games, high scores and configuration files go to a save folder of the game's own, outside the archive, and the game sees them on its drive next to its original files. Delete that folder and the game is back to the state it came in. `-scratch` keeps the writes for that mount only, which suits an installer CD, and `-nosidecar` makes the drive read-only.
 
-A few things are good to know. 7z, RAR 5 and tar archives cannot hand out one file without unpacking everything before it, so they are refused until you set `archive_sequential = cache`; then they are unpacked once into a cache and served from there. Solid RAR 4 archives are refused either way. The cache has a size cap and keeps unused entries for a week, and `mount -cache` shows what is in it. Archives that ask for a password, and archives split into volumes, are refused with a message that says so.
+A few things are good to know. 7z, RAR 5 and tar archives cannot hand out one file without unpacking everything before it, so they are unpacked once into a cache and served from there; `archive_sequential = refuse` keeps them out instead. Solid RAR 4 archives are refused either way. The cache has a size cap and keeps unused entries for a week, and `mount -cache` shows what is in it. Archives that ask for a password, and archives split into volumes, are refused with a message that says so.
 
 ---
 
@@ -187,7 +187,7 @@ webserver_enabled = true
 webserver_token_file = true
 ```
 
-Start dosbox-automation, wait a couple of seconds, and the token is written to `~/.config/dosbox-automation/webserver/api_token`. You can also set the `DOSBOX_API_TOKEN` environment variable before starting if you prefer to generate your own. The Swagger UI is at `http://localhost:8386` once the server is running.
+Start dosbox-automation, wait a couple of seconds, and the token is written to `~/.config/dosbox-automation/webserver/api_token`. You can also set the `DOSBOX_API_TOKEN` environment variable before starting if you prefer to generate your own. Once the server runs, `http://localhost:8386` leads to the Swagger UI, which documents every endpoint and lets you try it.
 
 ```bash
 # grab a screenshot
@@ -233,7 +233,7 @@ sequence = [
 ]
 ```
 
-The [recipes page](https://www.dosbox-automation.org/0.85.1/automation/recipes/) of the manual has the full format.
+The [recipes page](https://www.dosbox-automation.org/0.86.0/automation/recipes/) of the manual has the full format.
 
 Keyboard and mouse input can be recorded as JSON and replayed frame-accurately on another machine. The recording includes the CPU speed and keyboard layout so the replay is deterministic.
 
@@ -241,7 +241,7 @@ The API also gives you read and write access to guest memory, CPU registers and 
 
 **AI agents:** [dosbox-mcp](#for-ai-agents-dosbox-mcp), our MCP server, gives Claude Code, Claude Desktop or any other MCP client the typing, the screen, frames and video, Lua scripts, memory, registers, ports and freezes.
 
-The test suite has over 2300 C++ unit tests and about 300 Python integration tests. Several of those are full game installations that run end to end through the API.
+The test suite has over 2700 C++ unit tests and about 500 Python integration tests. Several of those are full game installations that run end to end through the API.
 
 ---
 
@@ -255,7 +255,7 @@ The Cheat Workbench is a web page that dosbox-automation serves itself whenever 
 
 The page puts everything the API can do with memory into one place. The scanner finds a value, say your ammo, and narrows it down scan by scan as the value changes. The cheat table keeps what you found, writes it, and freezes it so the health stays put. Beside them sit a hex viewer with bookmarks and write watches, the CPU registers, the DOS memory blocks and the program's PSP. The page can also capture video, screenshots and audio, set the mixer, type into the game, record your input and trim the recording on a timeline, and export it as JSON or as a Lua script you can replay.
 
-The [Cheat Workbench page](https://www.dosbox-automation.org/0.85.1/automation/cheat-workbench/) of the manual walks through it panel by panel, and its [two-minute video](https://youtu.be/FeRsGde-AH4) finds, writes and freezes the ammo counter in Commander Keen 4.
+The [Cheat Workbench page](https://www.dosbox-automation.org/0.86.0/automation/cheat-workbench/) of the manual walks through it panel by panel, and its [two-minute video](https://youtu.be/FeRsGde-AH4) finds, writes and freezes the ammo counter in Commander Keen 4.
 
 ---
 
@@ -278,7 +278,7 @@ Recorded and scripted with the included reference harness, driving the emulator 
 
 ## Security
 
-An HTTP server inside an emulator is an attack surface and we treat it as one: bearer-token auth on every endpoint, host header validation, and mount restrictions that limit what the guest can reach on the host. The [security policy](https://www.dosbox-automation.org/0.85.1/automation/security/) has the details.
+An HTTP server inside an emulator is an attack surface and we treat it as one: bearer-token auth on every endpoint, host header validation, and mount restrictions that limit what the guest can reach on the host. The [security policy](https://www.dosbox-automation.org/0.86.0/automation/security/) has the details.
 
 Security reports go to the contact address in the policy. Everything else goes on the [issue tracker](https://github.com/dosbox-automation/dosbox-automation/issues).
 
@@ -298,7 +298,7 @@ The project lives at [github.com/dosbox-automation](https://github.com/dosbox-au
 
 ## License
 
-dosbox-automation is licensed under the GNU General Public License v2.0 or later, like the DOSBox Staging code it builds on. Bundled third-party libraries and tools keep their own licenses; [THIRD_PARTY_LICENSES.txt](THIRD_PARTY_LICENSES.txt) lists them. UniMenu, the program menu on the bundled Y: drive, ships as a binary under its own freeware licence (resources/drives/y/dos/unimenu.txt).
+dosbox-automation is licensed under the GNU General Public License v2.0 or later, like the DOSBox Staging code it builds on. Bundled third-party libraries and tools keep their own licenses; [THIRD_PARTY_LICENSES.txt](THIRD_PARTY_LICENSES.txt) lists them. Our own DOS programs on the bundled Y: drive, UniMenu and VIEW, are licensed under the GNU General Public License v3.0 or later; their sources are in vendor/dos-programs/. The license text is in [LICENSE](LICENSE), which parts carry which license in [NOTICE](NOTICE).
 
 ---
 

@@ -18,6 +18,7 @@ public:
 	static void Post(const httplib::Request& req, httplib::Response& res);
 
 	VideoCaptureMode mode = VideoCaptureMode::Raw;
+	bool started          = false;
 };
 
 class CaptureStopCommand : public Command {
@@ -42,6 +43,8 @@ public:
 	static void Post(const httplib::Request& req, httplib::Response& res);
 
 	std::string output_path = {};
+	bool started            = false;
+	bool path_refused       = false;
 };
 
 class AudioCaptureStopCommand : public Command {

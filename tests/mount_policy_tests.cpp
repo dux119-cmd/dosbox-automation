@@ -4,6 +4,7 @@
 
 #include "dos/programs/mount_policy.h"
 
+#include <algorithm>
 #include <array>
 #include <cstdint>
 #include <cstring>
@@ -15,6 +16,8 @@
 #include <gtest/gtest.h>
 
 #include "archive_fixtures.h"
+#include "misc/cross.h"
+#include "test_home.h"
 #include "test_temp_dir.h"
 
 #if !defined(WIN32)
@@ -941,7 +944,7 @@ TEST_F(MountPolicyTest, ImagePathApiOutsideAllowedRoots)
 	                                                    {allowed});
 
 	EXPECT_FALSE(verdict.allowed);
-	EXPECT_EQ(verdict.reason, DenyReason::OutsideWhitelist);
+	EXPECT_EQ(verdict.reason, DenyReason::OutsideImageRoots);
 }
 
 TEST_F(MountPolicyTest, ImagePathApiUnderAllowedRoot)
@@ -1004,7 +1007,7 @@ TEST_F(MountPolicyTest, ImagePathApiOutsideConfAnchorAndRoots)
 	                                                    anchor);
 
 	EXPECT_FALSE(verdict.allowed);
-	EXPECT_EQ(verdict.reason, DenyReason::OutsideWhitelist);
+	EXPECT_EQ(verdict.reason, DenyReason::OutsideImageRoots);
 }
 
 TEST_F(MountPolicyTest, ImagePathApiNoAnchorNoRootsBlocks)
@@ -1015,7 +1018,7 @@ TEST_F(MountPolicyTest, ImagePathApiNoAnchorNoRootsBlocks)
 	        MountPolicy::ValidateImagePath(img, MountOrigin::Api, {}, {});
 
 	EXPECT_FALSE(verdict.allowed);
-	EXPECT_EQ(verdict.reason, DenyReason::OutsideWhitelist);
+	EXPECT_EQ(verdict.reason, DenyReason::OutsideImageRoots);
 }
 
 TEST_F(MountPolicyTest, ImagePathApiAnchorAndRootsAreAdditive)
@@ -1064,7 +1067,7 @@ TEST_F(MountPolicyTest, ImagePathGuestCommandDeniedOutsideRootsWhenInjectionPoss
 	                                                    {allowed});
 
 	EXPECT_FALSE(verdict.allowed);
-	EXPECT_EQ(verdict.reason, DenyReason::OutsideWhitelist);
+	EXPECT_EQ(verdict.reason, DenyReason::OutsideImageRoots);
 }
 
 TEST_F(MountPolicyTest, ImagePathGuestCommandUnderAllowedRootWhenInjectionPossible)
@@ -1107,7 +1110,7 @@ TEST_F(MountPolicyTest, ImagePathGuestCommandNoRootsNoAnchorDeniedWhenInjectionP
 	        img, MountOrigin::GuestCommand, {}, {});
 
 	EXPECT_FALSE(verdict.allowed);
-	EXPECT_EQ(verdict.reason, DenyReason::OutsideWhitelist);
+	EXPECT_EQ(verdict.reason, DenyReason::OutsideImageRoots);
 }
 
 TEST_F(MountPolicyTest, ImagePathApiEnforcesWithoutInjection)
@@ -1122,7 +1125,7 @@ TEST_F(MountPolicyTest, ImagePathApiEnforcesWithoutInjection)
 	        MountPolicy::ValidateImagePath(img, MountOrigin::Api, {}, {});
 
 	EXPECT_FALSE(verdict.allowed);
-	EXPECT_EQ(verdict.reason, DenyReason::OutsideWhitelist);
+	EXPECT_EQ(verdict.reason, DenyReason::OutsideImageRoots);
 }
 
 TEST_F(MountPolicyTest, InjectionNotPossibleByDefault)
@@ -1351,7 +1354,7 @@ TEST_F(MountPolicyTest, ApiEmptyRootsDeniesAll)
 	const auto verdict = MountPolicy::ValidateImagePath(img, MountOrigin::Api, {});
 
 	EXPECT_FALSE(verdict.allowed);
-	EXPECT_EQ(verdict.reason, DenyReason::OutsideWhitelist);
+	EXPECT_EQ(verdict.reason, DenyReason::OutsideImageRoots);
 }
 
 TEST_F(MountPolicyTest, CueCommentNotMatchedAsFile)
@@ -1491,6 +1494,25 @@ TEST_F(MountPolicyTest, ArchivePathIsoPassesUnderItsOwnNameOnly)
 	EXPECT_EQ(as_zip.verdict.reason, DenyReason::NotAnArchive);
 }
 
+// The archive the user named on the command line is theirs to mount, with
+// the webserver on too; its neighbours stay under the whitelist.
+TEST_F(MountPolicyTest, TheCommandLinesArchiveIsAnAllowedRoot)
+{
+	const auto zip   = BuiltArchive(tmp_dir, "game.zip", ArchiveFixtures::Kind::ZipStored);
+	const auto other = BuiltArchive(tmp_dir, "other.zip", ArchiveFixtures::Kind::ZipStored);
+	init_config_dir();
+	MountPolicy::InitPolicyConfig({}, zip);
+
+	const auto named = MountPolicy::ValidateArchivePath(
+	        zip, MountOrigin::Api, MountPolicy::AllowedImageRoots(), {}, false);
+	EXPECT_TRUE(named.verdict.allowed)
+	        << MountPolicy::DenyReasonText(named.verdict.reason);
+	const auto neighbour = MountPolicy::ValidateArchivePath(
+	        other, MountOrigin::Api, MountPolicy::AllowedImageRoots(), {}, false);
+	EXPECT_FALSE(neighbour.verdict.allowed);
+	MountPolicy::InitPolicyConfig({});
+}
+
 TEST_F(MountPolicyTest, ArchivePathJunkIsNotAnArchive)
 {
 	const auto junk = tmp_dir / "notes.zip";
@@ -1571,7 +1593,7 @@ TEST_F(MountPolicyTest, ArchivePathRunsTheHostStepsBeforeTheSniff)
 	const auto api = MountPolicy::ValidateArchivePath(
 	        zip, MountOrigin::Api, {tmp_dir / "elsewhere"}, {}, false);
 	EXPECT_FALSE(api.verdict.allowed);
-	EXPECT_EQ(api.verdict.reason, DenyReason::OutsideWhitelist);
+	EXPECT_EQ(api.verdict.reason, DenyReason::OutsideImageRoots);
 	// Under a whitelisted root it passes.
 	const auto api_ok = MountPolicy::ValidateArchivePath(
 	        zip, MountOrigin::Api, {tmp_dir}, {}, false);
@@ -1694,6 +1716,7 @@ TEST(MountPolicyMessages, EveryDenyReasonHasDistinctText)
 	                              DenyReason::SymlinkComponent,
 	                              DenyReason::SystemPath,
 	                              DenyReason::OutsideWhitelist,
+	                              DenyReason::OutsideImageRoots,
 	                              DenyReason::NotADiskImage,
 	                              DenyReason::NotADirectory,
 	                              DenyReason::ReservedDeviceName};
@@ -1722,11 +1745,126 @@ TEST(MountPolicyMessages, PolicyReasonsGetTheRefusedMessage)
 {
 	EXPECT_STREQ(MountPolicy::DenyMessageId(DenyReason::OutsideWhitelist),
 	             "PROGRAM_MOUNT_POLICY_REFUSED");
+	EXPECT_STREQ(MountPolicy::DenyMessageId(DenyReason::OutsideImageRoots),
+	             "PROGRAM_MOUNT_POLICY_REFUSED_FILE");
 	EXPECT_STREQ(MountPolicy::DenyMessageId(DenyReason::SystemPath),
-	             "PROGRAM_MOUNT_POLICY_REFUSED");
+	             "PROGRAM_MOUNT_POLICY_SYSTEM");
 	EXPECT_STREQ(MountPolicy::DenyMessageId(DenyReason::ReservedDeviceName),
-	             "PROGRAM_MOUNT_POLICY_REFUSED");
+	             "PROGRAM_MOUNT_POLICY_SYSTEM");
 	EXPECT_STREQ(MountPolicy::DenyMessageId(DenyReason::SymlinkComponent),
 	             "PROGRAM_MOUNT_POLICY_SYMLINK");
 	EXPECT_STREQ(MountPolicy::DenyMessageId(DenyReason::None), "");
+}
+
+// -- The engine's own folders (ada-fl3c) --
+
+TEST_F(MountPolicyTest, AnAnchorAtInOrAboveAnEngineFolderOpensNothing)
+{
+	const auto engine = fs::canonical(CreateDir("home/.config/dosbox-automation"));
+	const auto inside = fs::canonical(
+	        CreateDir("home/.config/dosbox-automation/webserver"));
+	const auto games = fs::canonical(CreateDir("games"));
+	const std::vector<fs::path> engine_folders = {engine};
+
+	EXPECT_TRUE(MountPolicy::AnchorFor(engine, engine_folders).empty());
+	EXPECT_TRUE(MountPolicy::AnchorFor(inside, engine_folders).empty());
+	EXPECT_TRUE(MountPolicy::AnchorFor(fs::canonical(tmp_dir / "home"), engine_folders)
+	                    .empty());
+	EXPECT_EQ(MountPolicy::AnchorFor(games, engine_folders), games);
+}
+
+TEST_F(MountPolicyTest, APortableProgramFolderAnchorsOnlyBelowItself)
+{
+	const auto program = fs::canonical(CreateDir("portable"));
+	const auto games   = fs::canonical(CreateDir("portable/games"));
+
+	EXPECT_TRUE(MountPolicy::AnchorFor(program, {}, program).empty());
+	EXPECT_TRUE(MountPolicy::AnchorFor(fs::canonical(tmp_dir), {}, program).empty());
+	EXPECT_EQ(MountPolicy::AnchorFor(games, {}, program), games);
+}
+
+TEST_F(MountPolicyTest, TheEnginesOwnDrivesFolderOpensInsideTheDataFolder)
+{
+	const auto data   = get_data_dir();
+	const auto drives = data / "drives";
+	fs::create_directories(drives / "y");
+	fs::create_directories(data / "saves");
+	MountPolicy::SetDrivesRootOverride(drives);
+	MountPolicy::InitPolicyConfig({});
+
+	const auto inside = MountPolicy::ValidateDirectoryMount(
+	        drives / "y",
+	        {},
+	        MountPolicy::AllowedBases(),
+	        DirMountPolicy::WhitelistEnforced);
+	EXPECT_TRUE(inside.allowed) << MountPolicy::DenyReasonText(inside.reason);
+	const auto beside = MountPolicy::ValidateDirectoryMount(
+	        data / "saves",
+	        {},
+	        MountPolicy::AllowedBases(),
+	        DirMountPolicy::WhitelistEnforced);
+	EXPECT_EQ(beside.reason, DenyReason::EngineFolder);
+
+	MountPolicy::SetDrivesRootOverride({});
+	MountPolicy::InitPolicyConfig({});
+	fs::remove_all(drives);
+	fs::remove_all(data / "saves");
+}
+
+TEST_F(MountPolicyTest, EngineFoldersAreTheConfigDataAndCacheFolders)
+{
+	const auto folders = MountPolicy::EngineFolders();
+	for (const auto& folder :
+	     {get_config_dir(), get_data_dir(), get_cache_dir()}) {
+		const auto expected = fs::weakly_canonical(folder);
+		EXPECT_NE(std::find(folders.begin(), folders.end(), expected),
+		          folders.end())
+		        << expected;
+	}
+}
+
+TEST_F(MountPolicyTest, TheWhitelistNeverOpensAnEngineFolder)
+{
+	const auto base = fs::canonical(TestHome::Root());
+	for (const auto& folder :
+	     {get_config_dir(), get_data_dir(), get_cache_dir()}) {
+		const auto below = folder / "below";
+		fs::create_directories(below);
+		for (const auto& target : {folder, below}) {
+			const auto verdict = MountPolicy::ValidateDirectoryMount(
+			        target, {}, {base}, DirMountPolicy::WhitelistEnforced);
+			EXPECT_FALSE(verdict.allowed) << target;
+			EXPECT_EQ(verdict.reason, DenyReason::EngineFolder) << target;
+		}
+		fs::remove_all(below);
+	}
+}
+
+TEST_F(MountPolicyTest, TheOwnerAtTheKeyboardStillReachesTheConfigFolder)
+{
+	const auto verdict = MountPolicy::ValidateDirectoryMount(
+	        get_config_dir(), {}, {}, DirMountPolicy::OwnerTrusted);
+	EXPECT_TRUE(verdict.allowed);
+}
+
+TEST_F(MountPolicyTest, AnImageInAnEngineFolderIsRefusedOverTheApi)
+{
+	const auto cache = get_cache_dir();
+	fs::create_directories(cache);
+	const auto img  = CreateFatImage("probe.img");
+	const auto copy = cache / "probe.img";
+	fs::copy_file(img, copy, fs::copy_options::overwrite_existing);
+
+	const auto verdict = MountPolicy::ValidateImagePath(
+	        copy, MountOrigin::Api, {fs::canonical(TestHome::Root())}, {});
+	EXPECT_FALSE(verdict.allowed);
+	EXPECT_EQ(verdict.reason, DenyReason::EngineFolder);
+	fs::remove(copy);
+}
+
+TEST(MountPolicyMessages, AnEngineFolderGetsTheSystemFolderMessage)
+{
+	EXPECT_STREQ(MountPolicy::DenyMessageId(DenyReason::EngineFolder),
+	             "PROGRAM_MOUNT_POLICY_SYSTEM");
+	EXPECT_STRNE(MountPolicy::DenyReasonText(DenyReason::EngineFolder), "");
 }

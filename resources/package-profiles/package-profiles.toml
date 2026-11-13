@@ -1,0 +1,70 @@
+# This file is part of the dosbox-automation Project.
+# License: GPL-2.0-or-later. Contact: dosbox-automation-project@trinity2k.net
+#
+# Where the stores keep a game package's DOSBox conf. A profile of the same name
+# in your own package-profiles.toml replaces one here; enabled = false drops it.
+# dosconfig_working_dir: the folder the conf's relative MOUNT paths count from.
+
+[[dosbox-gog-pair]]
+# GOG's DOSBox releases: dosbox<Name>.conf and <stem>_single.conf at the root;
+# GOG starts DOSBox in DOSBOX\, so their mount C ".." is the root
+enabled = true
+dosconfig_paths = ["."]
+dosconfig_file = ["dosbox*.conf"]
+dosconfig_chained = ["dosbox*_single.conf"]
+dosconfig_working_dir = "DOSBOX"
+
+[[dosbox-gog-pair-folders]]
+# The GOG pair per game folder: Steam's Sierra and Space Quest collections,
+# Betrayal at Krondor, X-Wing, Star Control
+enabled = true
+dosconfig_paths = ["*/DOSBOX", "*/*/DOSBOX", "*"]
+dosconfig_file = ["dosbox*.conf"]
+dosconfig_chained = ["dosbox*_single.conf"]
+dosconfig_working_dir = "DOSBOX"
+
+[[steam-nightdive-linux]]
+# Nightdive and Atari: Wizardry 6 and 7, F-19, Silent Service, Rex Nebular, Tex Murphy
+enabled = true
+dosconfig_paths = ["dosbox_linux"]
+dosconfig_file = ["dosbox_*.conf"]
+dosconfig_chained = ["dosbox_*_launch_linux.conf"]
+
+[[gog-bethesda-doom]]
+# The DOS version inside GOG's DOOM + DOOM II
+enabled = true
+dosconfig_paths = ["dosdoom/dosbox"]
+dosconfig_file = ["doom.conf"]
+dosconfig_chained = ["doom_single.conf"]
+
+[[steam-bethesda-wolf3d]]
+enabled = true
+dosconfig_paths = ["DOSBox"]
+dosconfig_file = ["wolf3d.conf"]
+dosconfig_chained = ["wolf3d_single.conf"]
+
+[[steam-sneg-forgotten-realms]]
+# Forgotten Realms: The Archives, one game per folder, chained as its batch does
+enabled = true
+dosconfig_paths = ["games/*"]
+dosconfig_file = ["base.conf"]
+dosconfig_chained = ["graphics.conf", "game.conf"]
+
+[[steam-apogee-daum]]
+# The Apogee and 3D Realms line with the Daum build
+enabled = true
+dosconfig_paths = [".", "*"]
+dosconfig_file = ["artic.conf", "crystal.conf", "towers.conf", "chaos.conf", "wacky.conf", "nukem2.conf"]
+
+[[steam-pixelgames-uk]]
+# California Games I and II, Temple of Apshai Trilogy
+enabled = true
+dosconfig_paths = ["."]
+dosconfig_file = ["calgames.conf", "cgii.conf", "trilogy.conf"]
+
+[[zoom-platform]]
+# ZOOM Platform: zoom_<game>.conf or the older z_<game>.conf beside the game,
+# in the Linux tarball's game folder or an unpacked installer's app folder
+enabled = true
+dosconfig_paths = [".", "*"]
+dosconfig_file = ["zoom_*.conf", "z_*.conf"]

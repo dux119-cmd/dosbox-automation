@@ -15,8 +15,10 @@ dosbox fixture directly.
 """
 
 import os
+import secrets
 import shutil
 import subprocess
+import time
 from pathlib import Path
 
 import pytest
@@ -499,3 +501,141 @@ def test_drive_swap_malformed_json(dosbox_e2e, tmp_path):
     # Server should still be responsive
     r2 = inst.client.status()
     assert r2.status_code == 200
+
+
+# -----------------------------------------------------------------------
+# MOUNT at the prompt: the refusal names the setting that would allow it
+# -----------------------------------------------------------------------
+
+def refusal_screen(inst, command: str, timeout: float = 15) -> str:
+    """Types a MOUNT line and returns the screen once the refusal shows."""
+    client = inst.client
+    deadline = time.monotonic() + timeout
+    while client.type_string(command + "\n").status_code == 409:
+        assert time.monotonic() < deadline, "input stayed busy"
+        time.sleep(0.1)
+    text = ""
+    while time.monotonic() < deadline:
+        text = client.screen_text().json()["text"]
+        if "The security page of the manual" in text:
+            return text
+        time.sleep(0.2)
+    raise AssertionError(f"no refusal on screen after {timeout}s:\n{text}")
+
+
+def test_refusal_hint_file(dosbox_e2e, tmp_path):
+    image = write_floppy_image(tmp_path / "x" / "a.img")
+    command = f"mount a {image}"
+    assert len(command) < 120, command
+
+    inst = dosbox_e2e()
+    inst.client.wait_shell(timeout=15)
+    text = refusal_screen(inst, command)
+    assert "mount_allowed_image_roots" in text, text
+    assert "mount_allowed_bases" not in text, text
+
+
+def test_refusal_hint_folder(dosbox_e2e, tmp_path):
+    folder = tmp_path / "x"
+    folder.mkdir()
+    command = f"mount d {folder}"
+    assert len(command) < 120, command
+
+    inst = dosbox_e2e()
+    inst.client.wait_shell(timeout=15)
+    text = refusal_screen(inst, command)
+    assert "mount_allowed_bases" in text, text
+    assert "mount_allowed_image_roots" not in text, text
+
+
+# -----------------------------------------------------------------------
+# The engine's own folders are no mount root (ada-fl3c)
+# -----------------------------------------------------------------------
+
+def start_in_home(home: Path, extra_args=()):
+    """An engine with a HOME and XDG folders of its own and a primary conf."""
+    from conftest import DOSBOX_BIN, DosboxInstance, StderrCapture, find_free_port
+    from dosbox_client import DosboxClient
+
+    config = home / ".config" / "dosbox-automation"
+    config.mkdir(parents=True, exist_ok=True)
+    (config / "dosbox-automation.conf").write_text("[cpu]\n", encoding="utf-8")
+    port = find_free_port()
+    token = secrets.token_hex(32)
+    env = {
+        **os.environ,
+        "SDL_VIDEODRIVER": "offscreen",
+        "SDL_AUDIODRIVER": "dummy",
+        "HOME": str(home),
+        "XDG_CONFIG_HOME": str(home / ".config"),
+        "XDG_DATA_HOME": str(home / ".local" / "share"),
+        "XDG_CACHE_HOME": str(home / ".cache"),
+        "DOSBOX_API_TOKEN": token,
+    }
+    proc = subprocess.Popen(
+        [DOSBOX_BIN, "--nolocalconf", "--set", "webserver_enabled=true",
+         "--set", f"webserver_port={port}", *extra_args],
+        env=env, cwd=str(home), stdout=subprocess.DEVNULL, stderr=subprocess.PIPE,
+    )
+    capture = StderrCapture(proc.stderr)
+    capture.start()
+    if not capture.ready.wait(timeout=15):
+        proc.kill()
+        capture.join(timeout=2)
+        raise RuntimeError(f"DOSBox did not start:\n{capture.get_output()[:2000]}")
+    client = DosboxClient(f"http://127.0.0.1:{port}", token=token)
+    client.wait_ready(timeout=10)
+    return DosboxInstance(client, proc, capture, home)
+
+
+def mounted_screen(inst, command: str, timeout: float = 15) -> str:
+    client = inst.client
+    deadline = time.monotonic() + timeout
+    while client.type_string(command + "\n").status_code == 409:
+        assert time.monotonic() < deadline, "input stayed busy"
+        time.sleep(0.1)
+    text = ""
+    while time.monotonic() < deadline:
+        text = client.screen_text().json()["text"]
+        if "mounted as D drive" in text or "The security page" in text:
+            return text
+        time.sleep(0.2)
+    raise AssertionError(f"no answer on screen after {timeout}s:\n{text}")
+
+
+def test_the_primary_conf_folder_is_no_mount_root(tmp_path):
+    home = tmp_path / "h"
+    inst = start_in_home(home)
+    try:
+        inst.client.wait_shell(timeout=15)
+        text = refusal_screen(inst, f"mount d {home / '.config' / 'dosbox-automation'}")
+        assert "dosbox-automation's own folder" in text, text
+    finally:
+        inst.shutdown()
+
+
+def test_a_conf_in_the_home_folder_opens_no_home(tmp_path):
+    home = tmp_path / "h"
+    home.mkdir()
+    (home / "game.conf").write_text("[cpu]\n", encoding="utf-8")
+    inst = start_in_home(home, ["-conf", str(home / "game.conf")])
+    try:
+        inst.client.wait_shell(timeout=15)
+        text = refusal_screen(inst, f"mount d {home}")
+        assert "mount_allowed_bases" in text, text
+    finally:
+        inst.shutdown()
+
+
+def test_a_conf_in_a_game_folder_still_anchors_there(tmp_path):
+    home = tmp_path / "h"
+    game = home / "game"
+    game.mkdir(parents=True)
+    (game / "game.conf").write_text("[cpu]\n", encoding="utf-8")
+    inst = start_in_home(home, ["-conf", str(game / "game.conf")])
+    try:
+        inst.client.wait_shell(timeout=15)
+        text = mounted_screen(inst, f"mount d {game}")
+        assert "mounted as D drive" in text, text
+    finally:
+        inst.shutdown()

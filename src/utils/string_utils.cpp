@@ -574,3 +574,41 @@ std::string right_pad(const std::string& str, int length, char pad_char)
 	temp.resize(length, pad_char);
 	return temp;
 }
+
+// Backslashes count only before a quote: there they are doubled, and the
+// quote itself is escaped.
+std::string quote_windows_argument(const std::string_view arg)
+{
+	std::string out  = "\"";
+	size_t backslashes = 0;
+	for (const char c : arg) {
+		if (c == '\\') {
+			++backslashes;
+			continue;
+		}
+		if (c == '"') {
+			out.append(backslashes * 2 + 1, '\\');
+		} else {
+			out.append(backslashes, '\\');
+		}
+		backslashes = 0;
+		out += c;
+	}
+	out.append(backslashes * 2, '\\');
+	out += '"';
+	return out;
+}
+
+std::string escape_control_bytes(const std::string_view text)
+{
+	std::string out = {};
+	for (const char c : text) {
+		const auto byte = static_cast<unsigned char>(c);
+		if (byte < 0x20 || byte == 0x7f) {
+			out += format_str("\\x%02x", byte);
+		} else {
+			out += c;
+		}
+	}
+	return out;
+}

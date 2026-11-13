@@ -21,6 +21,7 @@ add_library(archivereader STATIC
   exclusive_file.cpp
   head_sniff.cpp
   member_path.cpp
+  package_profile.cpp
   legacy_zip.cpp
   random_name.cpp
   helper_protocol.cpp

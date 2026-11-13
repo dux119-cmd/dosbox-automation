@@ -12,18 +12,37 @@
 
 namespace {
 
-TEST(DocsLocation, OnlineUrlUsesTheFullVersion)
+TEST(DocsLocation, APreReleaseReadsTheManualOfItsRelease)
 {
-	EXPECT_EQ(DocsLocation::OnlineUrl("introduction/about-this-manual/"),
-	          std::string("https://dosbox-automation.org/") +
-	                  DOSBOX_VERSION + "/introduction/about-this-manual/");
+	EXPECT_EQ(DocsLocation::ReleaseVersion("0.86.0-pre1"), "0.86.0");
 }
 
-TEST(DocsLocation, OnlineUrlOfTheRootEndsWithTheVersion)
+TEST(DocsLocation, AReleaseVersionStaysAsItIs)
+{
+	EXPECT_EQ(DocsLocation::ReleaseVersion("0.86.0"), "0.86.0");
+}
+
+TEST(DocsLocation, OnlineUrlUsesTheReleaseOfThisBuild)
+{
+	EXPECT_EQ(DocsLocation::OnlineUrl("introduction/about-this-manual/"),
+	          "https://dosbox-automation.org/" +
+	                  DocsLocation::ReleaseVersion(DOSBOX_VERSION) +
+	                  "/introduction/about-this-manual/");
+}
+
+TEST(DocsLocation, OnlineUrlOfTheRootEndsWithTheReleaseVersion)
 {
 	EXPECT_EQ(DocsLocation::OnlineUrl(""),
-	          std::string("https://dosbox-automation.org/") +
-	                  DOSBOX_VERSION + "/");
+	          "https://dosbox-automation.org/" +
+	                  DocsLocation::ReleaseVersion(DOSBOX_VERSION) + "/");
+}
+
+TEST(DocsLocation, OnlineUrlLeavesOutAPreReleaseSuffix)
+{
+	const std::string site = "https://dosbox-automation.org/";
+	const auto url         = DocsLocation::OnlineUrl("");
+	ASSERT_EQ(url.rfind(site, 0), 0u);
+	EXPECT_EQ(url.find('-', site.size()), std::string::npos);
 }
 
 TEST(DocsLocation, OnlineUrlNeverCarriesTheShortVersion)
@@ -37,11 +56,11 @@ TEST(DocsLocation, OnlineUrlNeverCarriesTheShortVersion)
 
 TEST(DocsLocation, BundledPathMirrorsTheSiteLayout)
 {
+	const auto release = DocsLocation::ReleaseVersion(DOSBOX_VERSION);
 	EXPECT_EQ(DocsLocation::BundledRelativePath("using-dosbox-automation/"),
-	          std::string("docs/") + DOSBOX_VERSION +
-	                  "/using-dosbox-automation/index.html");
+	          "docs/" + release + "/using-dosbox-automation/index.html");
 	EXPECT_EQ(DocsLocation::BundledRelativePath(""),
-	          std::string("docs/") + DOSBOX_VERSION + "/index.html");
+	          "docs/" + release + "/index.html");
 }
 
 } // namespace

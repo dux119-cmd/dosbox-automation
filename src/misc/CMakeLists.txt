@@ -6,6 +6,7 @@ target_sources(dosboxcommon PRIVATE
   dos_rwops.cpp
   fs_utils.cpp
   help_util.cpp
+  home_folders.cpp
   host_browser.cpp
   host_locale.cpp
   image_decoder.cpp

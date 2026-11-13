@@ -31,6 +31,8 @@ struct TreeNode {
 	int entry_index      = -1; // into the entries the tree was built from
 	int ordinal          = ImpliedOrdinal;
 	bool is_dir          = false;
+	// _DOSBOX at the root
+	bool is_hidden       = false;
 	int64_t size         = 0;
 	uint16_t dos_date    = 0;
 	uint16_t dos_time    = 0;
@@ -77,6 +79,10 @@ private:
 // The one top-level directory every entry lives under (design D10), or
 // "" when the root holds anything else or nothing.
 std::string SoloRootDirectory(const std::vector<Entry>& entries);
+
+// DOSBox Staging's automount layout: a drives directory and nothing beside it
+// but conf files at the root.
+bool IsAutomountLayout(const std::vector<Entry>& entries);
 
 // Nested design N3: the one archive-named regular file the archive holds
 // at the top beside nothing but an optional info.toml; nullptr for any

@@ -1,4 +1,5 @@
-This folder contains the source code for the Bundled Binaries listed in LICENSE.
+This folder contains the source code for the bundled DOS programs listed in
+THIRD_PARTY_LICENSES.txt.
    - debug.com, https://www.ibiblio.org/pub/micro/pc-stuff/freedos/files/dos/debug/debugx/2.50/v2.50.zip
    - deltree.com, https://www.ibiblio.org/pub/micro/pc-stuff/freedos/files/dos/deltree/deltree102g.zip
    - xcopy.exe, https://github.com/joncampbell123/dosbox-x/commit/c73a28f647bef2ab45e77e02a82b18ef8f1c80aa
@@ -6,7 +7,9 @@ This folder contains the source code for the Bundled Binaries listed in LICENSE.
    - find.com, https://www.ibiblio.org/pub/micro/pc-stuff/freedos/files/repositories/1.4/base/find/20260218.6/find.zip
    - sort.exe, https://www.ibiblio.org/pub/micro/pc-stuff/freedos/files/repositories/1.4/base/sort.zip
    - edit.exe (MSEDIT), https://sourceforge.net/projects/msedit/
-   - view.com (VIEW 1.0, ours, GPL-3.0-or-later), sources in view-1.0.zip under SOURCE/VIEW
+   - view.com (VIEW 1.3, ours, GPL-3.0-or-later), sources in view-1.3.zip under SOURCE/VIEW
+   - unimenu.exe (UniMenu 0.3, ours, GPL-3.0-or-later), sources in unimenu-0.3.zip under
+     SOURCE/UNIMENU (dos-unimenu, and the dostui library it is built on)
 
 In addition, it contains the FreeDOS screen fonts (CPI files) as in the original
 repositories, with full upstream documentation:

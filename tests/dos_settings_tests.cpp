@@ -24,8 +24,11 @@ TEST_F(DosSettings, ArchiveSettingsExistWithTheDesignDefaults)
 	        {  "archive_memory_limit",     "16"},
 	        {   "archive_max_entries",  "65536"},
 	        {      "archive_max_size",   "4096"},
-	        {    "archive_sequential", "refuse"},
+	        {    "archive_sequential", "unpack"},
+	        {          "package_conf",     "on"},
+	        {  "archive_package_conf",       ""},
 	        {  "archive_sidecar_path",       ""},
+	        {               "unimenu",     "on"},
 	};
 	for (const auto& [name, value] : expected) {
 		const auto property = section->GetProperty(name);
@@ -50,7 +53,10 @@ TEST_F(DosSettings, ArchiveSettingsRefuseValuesOutsideTheirRange)
 	EXPECT_EQ(section->GetInt("archive_cache_ttl"), 30);
 	auto seq = section->GetProperty("archive_sequential");
 	ASSERT_NE(seq, nullptr);
-	EXPECT_FALSE(seq->SetValue("unpack"));
+	EXPECT_FALSE(seq->SetValue("always"));
+	EXPECT_TRUE(seq->SetValue("refuse"));
+	EXPECT_EQ(section->GetString("archive_sequential"), "refuse");
+	// The name before 0.86.0 for unpack.
 	EXPECT_TRUE(seq->SetValue("cache"));
 	EXPECT_EQ(section->GetString("archive_sequential"), "cache");
 }

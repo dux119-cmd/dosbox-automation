@@ -46,6 +46,10 @@ enum class DenyReason {
 	ArchiveCueRejected,
 	// G12: a second archive on one MOUNT
 	ArchiveOnePerDrive,
+	// A file outside the conf anchor and mount_allowed_image_roots
+	OutsideImageRoots,
+	// The engine's config, data or cache folder (ada-fl3c)
+	EngineFolder,
 };
 
 struct MountVerdict {
@@ -131,16 +135,33 @@ bool IsLocked();
 void SetInjectionPossible(bool possible);
 bool IsInjectionPossible();
 
-// Read allowed_bases and allowed_image_roots from the primary config
-// file. Called once at startup. Values are read-only after init.
-void InitPolicyConfig(const std::filesystem::path& primary_config_path);
+// Read allowed_bases and allowed_image_roots from the primary config once at
+// startup. The command line's archive or game folder is the user's to mount,
+// as the conf anchor is.
+void InitPolicyConfig(const std::filesystem::path& primary_config_path,
+                      const std::filesystem::path& command_line_package = {});
 const std::vector<std::filesystem::path>& AllowedBases();
 const std::vector<std::filesystem::path>& AllowedImageRoots();
 
-// Parent directory of the last -conf file on the command line, canonical.
-// Empty when no -conf was loaded. The third policy root, alongside the two
-// accessors above.
+// Parent directory of the last -conf file or local dosbox.conf, canonical;
+// never the primary conf's (ada-fl3c). The third policy root, alongside the
+// two accessors above.
 std::filesystem::path ConfAnchor();
+
+// The config, data and cache folders, canonical; the config folder only
+// outside a portable layout, where it is the program folder (ada-g2q4).
+std::vector<std::filesystem::path> EngineFolders();
+
+// An empty path when conf_dir is, holds or lies inside an engine folder, or
+// is or holds the portable program folder; else conf_dir.
+std::filesystem::path AnchorFor(
+        const std::filesystem::path& conf_dir,
+        const std::vector<std::filesystem::path>& engine_folders,
+        const std::filesystem::path& portable_program_folder = {});
+
+// Tests only: the drives folder InitPolicyConfig grants, instead of the
+// resource search; empty restores the search.
+void SetDrivesRootOverride(const std::filesystem::path& drives_root);
 
 // Test-only observation hooks (aug-2yza), null in production. The unit
 // tests arm both to assert the sink invariant: no drive is constructed

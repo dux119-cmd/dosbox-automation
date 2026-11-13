@@ -1,5 +1,6 @@
 // SPDX-FileCopyrightText:  2002-2025 The DOSBox Team
 // SPDX-License-Identifier: GPL-2.0-or-later
+// Copyright (C) 2026 dosbox-automation contributors
 
 #include "dosbox_config.h"
 
@@ -10,9 +11,11 @@
 #include <algorithm>
 #include <cassert>
 #include <cstdio>
+#include <cstring>
 #include <string>
 
 #include "hardware/timer.h"
+#include "network/ethernet.h"
 
 // Constants
 constexpr int connection_timeout_ms = 5000;
@@ -24,6 +27,15 @@ const char* to_string(const SocketType socket_type)
 	case SocketType::Enet: return "ENet";
 	default: assert(false); return "Invalid SocketType value";
 	}
+}
+
+bool IsAddressOfThisMachine(const asio::ip::address& address)
+{
+	if (address.is_v6() && address.to_v6().is_v4_mapped()) {
+		return IsAddressOfThisMachine(
+		        asio::ip::make_address_v4(asio::ip::v4_mapped, address.to_v6()));
+	}
+	return address.is_loopback() || address.is_unspecified();
 }
 
 // --- GENERIC NET INTERFACE -------------------------------------------------
@@ -243,6 +255,22 @@ ENETClientSocket::ENETClientSocket(const char *destination, uint16_t port)
 
 	enet_address_set_host(&address, destination);
 	address.port = port;
+#ifdef ENET_IPV4_ONLY
+	const asio::ip::address host_address = asio::ip::address_v4(
+	        ntohl(address.host.s_addr));
+#else
+	asio::ip::address_v6::bytes_type host_bytes = {};
+	static_assert(sizeof(address.host) == std::tuple_size_v<decltype(host_bytes)>);
+	std::memcpy(host_bytes.data(), &address.host, host_bytes.size());
+	const asio::ip::address host_address = asio::ip::address_v6(host_bytes);
+#endif
+	if (!ETHERNET_HostLoopbackAllowed() && IsAddressOfThisMachine(host_address)) {
+		LOG_WARNING("ENET: %s is this machine, which [ethernet] host_loopback keeps out of reach",
+		            destination);
+		enet_host_destroy(client);
+		client = nullptr;
+		return;
+	}
 	peer = enet_host_connect(client, &address, 1, 0);
 	if (peer) {
 		LOG_INFO("ENET: Initiating connection to server %s:%u",
@@ -513,8 +541,21 @@ TCPClientSocket::TCPClientSocket(const char* destination, uint16_t port)
 {
 	std::error_code ec;
 	asio::ip::tcp::resolver resolver(*io);
-	auto endpoints = resolver.resolve(destination, std::to_string(port), ec);
+	const auto resolved = resolver.resolve(destination, std::to_string(port), ec);
 	if (ec) {
+		return;
+	}
+	// The guest dials this; the REST API listens on this machine's loopback
+	std::vector<asio::ip::tcp::endpoint> endpoints = {};
+	for (const auto& entry : resolved) {
+		if (ETHERNET_HostLoopbackAllowed() ||
+		    !IsAddressOfThisMachine(entry.endpoint().address())) {
+			endpoints.push_back(entry.endpoint());
+		}
+	}
+	if (endpoints.empty()) {
+		LOG_WARNING("SERIAL: %s is this machine, which [ethernet] host_loopback keeps out of reach",
+		            destination);
 		return;
 	}
 	asio::connect(socket, endpoints, ec);

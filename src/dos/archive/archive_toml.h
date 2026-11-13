@@ -13,22 +13,24 @@
 #include <utility>
 #include <vector>
 
-// The subset of TOML the sidecar and cache files use: bare keys, basic
-// strings, integers, booleans and [[table]] arrays. Anything else is an
-// error, since the engine never writes it (archive mount design, D3, D14).
+// The TOML subset the sidecar, cache and package profile files use: bare
+// keys, basic and literal one-line strings, integers, booleans, arrays of
+// strings, [[table]] arrays; anything else is an error (ada-xke9, ada-52dg).
 namespace ArchiveToml {
 
 constexpr size_t MaxDocumentBytes = 1024 * 1024;
 constexpr int MaxDocumentLines    = 100000;
 constexpr size_t MaxKeyBytes      = 64;
-constexpr size_t MaxValueBytes    = 64 * 1024;
+// For an array, the cap covers all its items together.
+constexpr size_t MaxValueBytes = 64 * 1024;
 
 struct Value {
-	enum class Kind { String, Integer, Boolean };
-	Kind kind        = Kind::String;
-	std::string text = {};
-	int64_t integer  = 0;
-	bool boolean     = false;
+	enum class Kind { String, Integer, Boolean, StringArray };
+	Kind kind                      = Kind::String;
+	std::string text               = {};
+	int64_t integer                = 0;
+	bool boolean                   = false;
+	std::vector<std::string> items = {};
 };
 
 struct Table {
@@ -38,6 +40,7 @@ struct Table {
 	std::optional<std::string> String(std::string_view key) const;
 	std::optional<int64_t> Integer(std::string_view key) const;
 	std::optional<bool> Boolean(std::string_view key) const;
+	std::optional<std::vector<std::string>> Strings(std::string_view key) const;
 
 	// Replaces the value of an existing key in place, else appends. The
 	// const char* overload exists because a literal would otherwise
@@ -46,6 +49,7 @@ struct Table {
 	void Set(std::string_view key, const char* text);
 	void Set(std::string_view key, int64_t integer);
 	void Set(std::string_view key, bool boolean);
+	void Set(std::string_view key, std::vector<std::string> items);
 };
 
 struct Document {
@@ -63,11 +67,15 @@ std::optional<Document> Parse(std::string_view text, std::string* error);
 std::string Serialize(const Document& document);
 
 // Refuses anything that is not a regular file under MaxDocumentBytes.
+std::optional<std::string> ReadTextFile(const std::filesystem::path& path,
+                                        std::string* error);
 std::optional<Document> ReadFile(const std::filesystem::path& path,
                                  std::string* error);
 
 // A temporary in the same directory (0600, created exclusively), then a
 // rename over the target, so a reader never sees half a file.
+bool WriteTextAtomically(const std::filesystem::path& path,
+                         std::string_view text, std::string* error);
 bool WriteAtomically(const std::filesystem::path& path,
                      const Document& document, std::string* error);
 

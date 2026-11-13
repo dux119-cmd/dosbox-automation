@@ -10,6 +10,7 @@
 #include <numeric>
 #include <vector>
 
+#include "augra/log.h"
 #include "dos.h"
 #include "dos/drives.h"
 #include "misc/cross.h"
@@ -115,6 +116,14 @@ void DOS_Drive_Cache::SetLabel(const char* vname,bool cdrom,bool allowupdate) {
 	this->updatelabel = allowupdate;
 	Set_Label(vname,label,cdrom);
 	LOG(LOG_DOSMISC,LOG_NORMAL)("DIRCACHE: Set volume label to %s",label);
+}
+
+void DOS_Drive_Cache::ReplaceLabel(const char* name)
+{
+	assert(name);
+	Set_Label(name, label, false);
+	updatelabel = false;
+	augra::log_info("dos", "volume label changed to %s", label);
 }
 
 uint16_t DOS_Drive_Cache::GetFreeID(CFileInfo* dir) {

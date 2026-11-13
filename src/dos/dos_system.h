@@ -8,7 +8,9 @@
 
 #include "dosbox.h"
 
+#include <optional>
 #include <string>
+#include <string_view>
 #include <vector>
 
 #include "utils/bit_view.h"
@@ -201,6 +203,9 @@ public:
 	void  EmptyCache           (void);
 
 	void SetLabel(const char *name, bool cdrom, bool allowupdate);
+	// A label change through DOS; unlike SetLabel it also replaces a
+	// label MOUNT -label set.
+	void ReplaceLabel(const char* name);
 	const char *GetLabel() const { return label; }
 
 	class CFileInfo final {
@@ -386,6 +391,24 @@ public:
 
 	// Can be overridden for example in iso images
 	virtual const char *GetLabel() { return dirCache.GetLabel(); }
+
+	// A volume label created or deleted through DOS (3Ch/5Bh or FCB 13h
+	// with the volume attribute); false refuses (access denied). The name
+	// is in DOS form, which every drive checks with IsDosLabelForm.
+	virtual bool SetVolumeLabel(const std::string& name);
+	// 1 to 8 characters, then optionally a dot and 1 to 3 more.
+	static bool IsDosLabelForm(std::string_view name);
+	virtual bool DeleteVolumeLabel();
+	// The label as the medium holds it; a cache may not have read it yet.
+	virtual std::string LabelOnMedium()
+	{
+		return GetLabel();
+	}
+	// The serial FORMAT wrote, where the medium carries one.
+	virtual std::optional<uint32_t> GetSerial()
+	{
+		return {};
+	}
 
 	DOS_Drive_Cache dirCache;
 

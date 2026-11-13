@@ -49,13 +49,10 @@ def _run_decoder_test(variant_name: str, cue_path: Path) -> None:
         client.wait_shell(timeout=15)
         time.sleep(5)
 
-        capture_dir = work_dir / "capture"
-        capture_dir.mkdir(parents=True, exist_ok=True)
-        wav_path = capture_dir / f"{variant_name}.wav"
-
-        r = client.audio_capture_start(str(wav_path))
+        r = client.audio_capture_start(f"cd-{variant_name}-{secrets.token_hex(4)}.wav")
         assert r.status_code == 200, (
             f"audio_capture_start failed: {r.status_code} {r.text}")
+        wav_path = Path(r.json()["path"])
 
         time.sleep(5)
 

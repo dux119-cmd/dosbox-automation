@@ -152,6 +152,41 @@ bool ParseString(std::string_view in, std::string& out, std::string_view& rest,
 	return false;
 }
 
+// A literal string per TOML 1.0, "String": no escapes, one line, starting
+// at the opening apostrophe.
+bool ParseLiteralString(std::string_view in, std::string& out,
+                        std::string_view& rest, std::string& error)
+{
+	out.clear();
+	for (size_t i = 1; i < in.size(); ++i) {
+		const auto c = in[i];
+		if (c == '\'') {
+			rest = in.substr(i + 1);
+			return true;
+		}
+		if (static_cast<unsigned char>(c) < 0x20 && c != '\t') {
+			error = "control byte inside a string";
+			return false;
+		}
+		out.push_back(c);
+		if (out.size() > MaxValueBytes) {
+			error = "string value too long";
+			return false;
+		}
+	}
+	error = "unterminated string";
+	return false;
+}
+
+bool ParseAnyString(std::string_view in, std::string& out,
+                    std::string_view& rest, std::string& error)
+{
+	if (in.front() == '\'') {
+		return ParseLiteralString(in, out, rest, error);
+	}
+	return ParseString(in, out, rest, error);
+}
+
 bool ParseInteger(std::string_view text, int64_t& out, std::string& error)
 {
 	if (text.empty()) {
@@ -207,9 +242,9 @@ bool ParseValue(std::string_view text, Value& value, std::string& error)
 		error = "missing value";
 		return false;
 	}
-	if (text.front() == '"') {
+	if (text.front() == '"' || text.front() == '\'') {
 		std::string_view rest = {};
-		if (!ParseString(text, value.text, rest, error)) {
+		if (!ParseAnyString(text, value.text, rest, error)) {
 			return false;
 		}
 		if (!OnlyCommentFollows(rest)) {
@@ -241,6 +276,90 @@ bool ParseValue(std::string_view text, Value& value, std::string& error)
 	return true;
 }
 
+// Parses an array of basic strings starting at text[pos] == '['. The array
+// may run over several lines, so it reads the document, not the line; pos
+// ends after the line holding the closing bracket.
+bool ParseArray(const std::string_view text, size_t& pos, Value& value,
+                int& line_number, std::string& error)
+{
+	value.kind = Value::Kind::StringArray;
+	value.items.clear();
+	size_t total     = 0;
+	bool want_item   = true;
+	auto skip_blanks = [&]() {
+		while (pos < text.size()) {
+			const auto c = text[pos];
+			if (c == '\n') {
+				++line_number;
+				++pos;
+			} else if (IsSpace(c) || c == '\r') {
+				++pos;
+			} else if (c == '#') {
+				pos = std::min(text.find('\n', pos), text.size());
+			} else {
+				break;
+			}
+		}
+	};
+	++pos;
+	while (true) {
+		skip_blanks();
+		if (line_number > MaxDocumentLines) {
+			error = "too many lines";
+			return false;
+		}
+		if (pos >= text.size()) {
+			error = "array not closed";
+			return false;
+		}
+		const auto c = text[pos];
+		if (c == ']') {
+			++pos;
+			break;
+		}
+		if (!want_item) {
+			if (c != ',') {
+				error = "missing comma in an array";
+				return false;
+			}
+			++pos;
+			want_item = true;
+			continue;
+		}
+		if (c == ',') {
+			error = "empty item in an array";
+			return false;
+		}
+		if (c != '"' && c != '\'') {
+			error = "array holds a value that is not a string";
+			return false;
+		}
+		auto item             = std::string();
+		std::string_view rest = {};
+		if (!ParseAnyString(text.substr(pos), item, rest, error)) {
+			return false;
+		}
+		total += item.size();
+		if (total > MaxValueBytes) {
+			error = "array value too long";
+			return false;
+		}
+		pos = text.size() - rest.size();
+		value.items.push_back(std::move(item));
+		want_item = false;
+	}
+	auto end = text.find('\n', pos);
+	if (end == std::string_view::npos) {
+		end = text.size();
+	}
+	if (!OnlyCommentFollows(TrimRight(text.substr(pos, end - pos)))) {
+		error = "text after the array";
+		return false;
+	}
+	pos = end + 1;
+	return true;
+}
+
 bool ParseHeader(std::string_view line, std::string& name, std::string& error)
 {
 	// line starts with "[["
@@ -249,7 +368,7 @@ bool ParseHeader(std::string_view line, std::string& name, std::string& error)
 		error = "unterminated table header";
 		return false;
 	}
-	const auto key = line.substr(2, close - 2);
+	const auto key = TrimRight(TrimLeft(line.substr(2, close - 2)));
 	if (key.empty() || key.size() > MaxKeyBytes ||
 	    !std::all_of(key.begin(), key.end(), IsKeyByte)) {
 		error = "bad table name";
@@ -300,6 +419,16 @@ void AppendTable(std::string& out, const Table& table)
 		case Value::Kind::Boolean:
 			out += value.boolean ? "true" : "false";
 			break;
+		case Value::Kind::StringArray:
+			out.push_back('[');
+			for (size_t i = 0; i < value.items.size(); ++i) {
+				if (i > 0) {
+					out += ", ";
+				}
+				AppendQuoted(out, value.items[i]);
+			}
+			out.push_back(']');
+			break;
 		}
 		out.push_back('\n');
 	}
@@ -344,6 +473,15 @@ std::optional<bool> Table::Boolean(const std::string_view key) const
 	return v->boolean;
 }
 
+std::optional<std::vector<std::string>> Table::Strings(const std::string_view key) const
+{
+	const auto* v = Find(key);
+	if (!v || v->kind != Value::Kind::StringArray) {
+		return {};
+	}
+	return v->items;
+}
+
 namespace {
 
 Value& SlotFor(Table& table, const std::string_view key)
@@ -386,6 +524,14 @@ void Table::Set(const std::string_view key, const bool boolean)
 	v         = Value{};
 	v.kind    = Value::Kind::Boolean;
 	v.boolean = boolean;
+}
+
+void Table::Set(const std::string_view key, std::vector<std::string> items)
+{
+	auto& v = SlotFor(*this, key);
+	v       = Value{};
+	v.kind  = Value::Kind::StringArray;
+	v.items = std::move(items);
 }
 
 std::vector<const Table*> Document::Array(const std::string_view name) const
@@ -463,7 +609,15 @@ std::optional<Document> Parse(const std::string_view text, std::string* error)
 		}
 		Value value = {};
 		auto why    = std::string();
-		if (!ParseValue(rest, value, why)) {
+		rest        = TrimLeft(rest);
+		if (!rest.empty() && rest.front() == '[') {
+			// The line is a view into text, so the array can go on
+			// reading past it.
+			pos = static_cast<size_t>(rest.data() - text.data());
+			if (!ParseArray(text, pos, value, line_number, why)) {
+				return fail(why, line_number);
+			}
+		} else if (!ParseValue(rest, value, why)) {
 			return fail(why, line_number);
 		}
 		current->pairs.emplace_back(std::string(key), std::move(value));
@@ -484,9 +638,10 @@ std::string Serialize(const Document& document)
 	return out;
 }
 
-std::optional<Document> ReadFile(const std::filesystem::path& path, std::string* error)
+std::optional<std::string> ReadTextFile(const std::filesystem::path& path,
+                                        std::string* error)
 {
-	const auto fail = [&](const char* why) -> std::optional<Document> {
+	const auto fail = [&](const char* why) -> std::optional<std::string> {
 		if (error) {
 			*error = ArchiveMount::PathToUtf8(path) + ": " + why;
 		}
@@ -520,19 +675,27 @@ std::optional<Document> ReadFile(const std::filesystem::path& path, std::string*
 	if (done != text.size()) {
 		return fail("short read");
 	}
+	return text;
+}
+
+std::optional<Document> ReadFile(const std::filesystem::path& path, std::string* error)
+{
+	const auto text = ReadTextFile(path, error);
+	if (!text) {
+		return {};
+	}
 	auto why = std::string();
-	auto doc = Parse(text, &why);
+	auto doc = Parse(*text, &why);
 	if (!doc && error) {
 		*error = ArchiveMount::PathToUtf8(path) + ": " + why;
 	}
 	return doc;
 }
 
-bool WriteAtomically(const std::filesystem::path& path,
-                     const Document& document, std::string* error)
+bool WriteTextAtomically(const std::filesystem::path& path,
+                         const std::string_view text, std::string* error)
 {
-	const auto text = Serialize(document);
-	auto temp       = path;
+	auto temp = path;
 	temp += "." + ArchiveMount::RandomHex(4) + ".tmp";
 	FILE* f = ArchiveMount::OpenExclusive(temp);
 	if (!f) {
@@ -562,6 +725,12 @@ bool WriteAtomically(const std::filesystem::path& path,
 		return false;
 	}
 	return true;
+}
+
+bool WriteAtomically(const std::filesystem::path& path,
+                     const Document& document, std::string* error)
+{
+	return WriteTextAtomically(path, Serialize(document), error);
 }
 
 } // namespace ArchiveToml

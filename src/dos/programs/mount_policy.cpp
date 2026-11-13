@@ -11,10 +11,9 @@
 //
 //   WhitelistEnforced  (webserver on)
 //     The REST API is an attack surface. Paths must be under one of:
-//       1. The conf anchor - parent directory of the last -conf file
-//          loaded on the command line. If DOSBox was started with
-//          -conf /home/user/games/test.conf, the anchor is
-//          /home/user/games/ and everything below it is reachable.
+//       1. The conf anchor - parent directory of the last -conf file,
+//          or of a local dosbox.conf; never the primary conf's, and none
+//          at, inside or above an engine folder (ada-fl3c).
 //       2. mount_allowed_bases - extra directory roots listed in the
 //          [webserver] section of the primary config file.
 //       3. mount_allowed_image_roots - same, but for image files
@@ -22,7 +21,8 @@
 //          anchor counts here as well, so a recipe can swap the disks
 //          sitting next to its own conf without the user editing the
 //          primary config.
-//     Anything outside these roots is blocked, even from autoexec.
+//     Anything outside these roots is blocked, even from autoexec, and
+//     the engine's config, data and cache folders even inside them.
 //     System directories are always blocked in both modes.
 //
 // The primary config is at $HOME/.config/dosbox-automation/ (Linux),
@@ -34,8 +34,8 @@
 //   - Temp directory. \Temp, \TMP, \TmpDir and \Windows\Temp on every
 //     Windows drive, %TEMP% and %TMP% are system paths, never mountable;
 //     /tmp on Linux and macOS opens through mount_allowed_bases.
-//   - Webserver enabled but no -conf file passed. Conf anchor is
-//     empty, so only mount_allowed_bases paths work.
+//   - Webserver enabled and no -conf file, or one in the home folder.
+//     Conf anchor is empty, so only mount_allowed_bases paths work.
 //   - Symlinks in the path. The policy rejects any path that has a
 //     symlink component, even if the target is under an allowed root.
 //
@@ -52,6 +52,7 @@
 #include "config/config.h"
 #include "dos/dos_names.h"
 #include "dosbox.h"
+#include "misc/cross.h"
 #include "misc/support.h"
 #include "misc/unicode.h"
 
@@ -386,6 +387,11 @@ bool ValidateDiskImageStructure(const std::filesystem::path& host_path)
 VerdictHookFn verdict_hook                      = nullptr;
 DriveConstructionHookFn drive_construction_hook = nullptr;
 
+// A per-user install puts the drives folder InitPolicyConfig grants inside
+// the data folder, so the engine-folder refusal lets it through.
+static std::filesystem::path engine_drives_root   = {};
+static std::filesystem::path drives_root_override = {};
+
 static MountVerdict ValidateDirectoryMountImpl(
         const std::filesystem::path& raw_path,
         const std::filesystem::path& conf_anchor,
@@ -441,7 +447,14 @@ static MountVerdict ValidateDirectoryMountImpl(
 		return verdict;
 	}
 
-	// WhitelistEnforced: must be under conf anchor or an allowed base
+	// Before the roots: an allowed base above an engine folder must not
+	// open it.
+	if (IsUnderAnyRoot(*canonical, EngineFolders()) &&
+	    (engine_drives_root.empty() ||
+	     !IsUnderAnyRoot(*canonical, {engine_drives_root}))) {
+		verdict.reason = DenyReason::EngineFolder;
+		return verdict;
+	}
 	auto all_roots = std::vector<std::filesystem::path>{};
 	if (!conf_anchor.empty()) {
 		all_roots.push_back(conf_anchor);
@@ -510,6 +523,10 @@ static MountVerdict ValidateHostFilePath(
 	// counts as a root: a conf that can autoexec a MOUNT of any image
 	// cannot be given less authority than its own autoexec.
 	if (origin == MountOrigin::Api || IsInjectionPossible()) {
+		if (IsUnderAnyRoot(*canonical, EngineFolders())) {
+			verdict.reason = DenyReason::EngineFolder;
+			return verdict;
+		}
 		auto all_roots = std::vector<std::filesystem::path>{};
 		if (!conf_anchor.empty()) {
 			all_roots.push_back(conf_anchor);
@@ -519,7 +536,7 @@ static MountVerdict ValidateHostFilePath(
 		                 allowed_image_roots.end());
 
 		if (all_roots.empty() || !IsUnderAnyRoot(*canonical, all_roots)) {
-			verdict.reason = DenyReason::OutsideWhitelist;
+			verdict.reason = DenyReason::OutsideImageRoots;
 			return verdict;
 		}
 	}
@@ -708,20 +725,38 @@ PolicyPaths ParsePolicyConfig(const std::filesystem::path& config_path)
 	return result;
 }
 
-void InitPolicyConfig(const std::filesystem::path& primary_config_path)
+void InitPolicyConfig(const std::filesystem::path& primary_config_path,
+                      const std::filesystem::path& command_line_package)
 {
 	policy_paths       = ParsePolicyConfig(primary_config_path);
 	policy_initialized = true;
 
+	// An archive is a root of its own file only; a game folder also holds
+	// the images it mounts.
+	if (!command_line_package.empty()) {
+		std::error_code ec   = {};
+		const auto canonical = std::filesystem::canonical(command_line_package, ec);
+		if (!ec) {
+			policy_paths.allowed_image_roots.push_back(canonical);
+			if (std::filesystem::is_directory(canonical, ec)) {
+				policy_paths.allowed_bases.push_back(canonical);
+			}
+		}
+	}
+
 	// Bundled drives/[c] auto-mount at startup (autoexec.cpp) through the
 	// same MOUNT path as guest/API mounts. First-party shipped content,
 	// same trust level as the conf anchor.
-	const auto drives_root = get_resource_path("drives");
+	engine_drives_root.clear();
+	const auto drives_root = drives_root_override.empty()
+	                               ? get_resource_path("drives")
+	                               : drives_root_override;
 	if (!drives_root.empty()) {
 		std::error_code ec;
 		const auto canonical = std::filesystem::canonical(drives_root, ec);
 		if (!ec) {
 			policy_paths.allowed_bases.push_back(canonical);
+			engine_drives_root = canonical;
 		}
 	}
 
@@ -749,10 +784,60 @@ const std::vector<std::filesystem::path>& AllowedImageRoots()
 
 std::filesystem::path ConfAnchor()
 {
-	if (!control || control->loaded_config_paths_canonical.empty()) {
+	if (!control || control->anchor_config_path.empty()) {
 		return {};
 	}
-	return control->loaded_config_paths_canonical.back().parent_path();
+	auto program_folder = std::filesystem::path();
+	if (is_portable_layout()) {
+		auto ec = std::error_code();
+		program_folder = std::filesystem::weakly_canonical(get_config_dir(),
+		                                                   ec);
+	}
+	return AnchorFor(control->anchor_config_path.parent_path(),
+	                 EngineFolders(),
+	                 program_folder);
+}
+
+std::vector<std::filesystem::path> EngineFolders()
+{
+	auto folders   = std::vector<std::filesystem::path>{};
+	const auto add = [&folders](const std::filesystem::path& folder) {
+		auto ec = std::error_code();
+		const auto canonical = std::filesystem::weakly_canonical(folder, ec);
+		if (!ec && !canonical.empty()) {
+			folders.push_back(canonical);
+		}
+	};
+	if (!is_portable_layout()) {
+		add(get_config_dir());
+	}
+	add(get_data_dir());
+	add(get_cache_dir());
+	return folders;
+}
+
+void SetDrivesRootOverride(const std::filesystem::path& drives_root)
+{
+	drives_root_override = drives_root;
+}
+
+std::filesystem::path AnchorFor(const std::filesystem::path& conf_dir,
+                                const std::vector<std::filesystem::path>& engine_folders,
+                                const std::filesystem::path& portable_program_folder)
+{
+	// The portable program folder holds the primary conf and the token file.
+	if (!portable_program_folder.empty() &&
+	    PathIsAtOrBelow(portable_program_folder.string(), conf_dir.string())) {
+		return {};
+	}
+	// A folder above an engine folder opens it from the outside.
+	for (const auto& folder : engine_folders) {
+		if (PathIsAtOrBelow(conf_dir.string(), folder.string()) ||
+		    PathIsAtOrBelow(folder.string(), conf_dir.string())) {
+			return {};
+		}
+	}
+	return conf_dir;
 }
 
 ArchiveVerdict ValidateArchivePath(
@@ -830,6 +915,7 @@ const char* DenyReasonText(const DenyReason reason)
 	case DenyReason::SymlinkComponent: return "symlink in path";
 	case DenyReason::SystemPath: return "system path";
 	case DenyReason::OutsideWhitelist: return "outside allowed directories";
+	case DenyReason::OutsideImageRoots: return "outside allowed image roots";
 	case DenyReason::NotADiskImage: return "not a recognized disk image";
 	case DenyReason::NotADirectory: return "not a directory";
 	case DenyReason::ReservedDeviceName: return "reserved device name";
@@ -860,6 +946,7 @@ const char* DenyReasonText(const DenyReason reason)
 		return "the cue sheet cannot be served from the archive";
 	case DenyReason::ArchiveOnePerDrive:
 		return "an archive drive takes one archive";
+	case DenyReason::EngineFolder: return "dosbox-automation's own folder";
 	}
 	return "";
 }
@@ -874,10 +961,12 @@ const char* DenyMessageId(const DenyReason reason)
 	case DenyReason::NotADirectory: return "PROGRAM_MOUNT_ERROR_2";
 	case DenyReason::SymlinkComponent:
 		return "PROGRAM_MOUNT_POLICY_SYMLINK";
+	case DenyReason::OutsideWhitelist: return "PROGRAM_MOUNT_POLICY_REFUSED";
+	case DenyReason::OutsideImageRoots:
+		return "PROGRAM_MOUNT_POLICY_REFUSED_FILE";
 	case DenyReason::SystemPath:
-	case DenyReason::OutsideWhitelist:
 	case DenyReason::ReservedDeviceName:
-		return "PROGRAM_MOUNT_POLICY_REFUSED";
+	case DenyReason::EngineFolder: return "PROGRAM_MOUNT_POLICY_SYSTEM";
 	case DenyReason::NotAnArchive: return "PROGRAM_MOUNT_ERROR_2";
 	case DenyReason::ArchiveSequential:
 		return "PROGRAM_MOUNT_ARCHIVE_SEQUENTIAL";

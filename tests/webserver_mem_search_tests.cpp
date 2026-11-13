@@ -4,11 +4,15 @@
 
 #include "webserver/private/memory.h"
 
+#include "hardware/guest_memory.h"
+
 #include <cstdint>
 #include <gtest/gtest.h>
 #include <vector>
 
+using GuestMemory::Range;
 using Webserver::ScanBufferForValue;
+using Webserver::ScanMappedForValue;
 
 namespace {
 
@@ -58,6 +62,32 @@ TEST(MemSearch, EmptyBufferReturnsEmpty)
 	std::vector<uint8_t> buf;
 	auto hits = ScanBufferForValue(buf, 0, 1);
 	EXPECT_TRUE(hits.empty());
+}
+
+TEST(MemSearch, MappedScanWithoutHolesReturnsAddresses)
+{
+	std::vector<uint8_t> buf = {0x63, 0x00, 0x63};
+	auto hits = ScanMappedForValue(buf, 0x1000, {}, 0x63, 1);
+	EXPECT_EQ(hits, (std::vector<uint32_t>{0x1000, 0x1002}));
+}
+
+// ada-q50n: holes read as zeros; nothing may match in them or across them.
+TEST(MemSearch, MappedScanIgnoresHolesAndTheirEdges)
+{
+	std::vector<uint8_t> buf = {0x00, 0x63, 0x00, 0x00, 0x00, 0x00, 0x63, 0x00};
+	const std::vector<Range> holes(1, Range{0x1002, 0x1006});
+
+	EXPECT_EQ(ScanMappedForValue(buf, 0x1000, holes, 0x0063, 2),
+	          (std::vector<uint32_t>{0x1006}));
+	EXPECT_EQ(ScanMappedForValue(buf, 0x1000, holes, 0x00, 1),
+	          (std::vector<uint32_t>{0x1000, 0x1007}));
+}
+
+TEST(MemSearch, MappedScanOfOnlyAHoleIsEmpty)
+{
+	std::vector<uint8_t> buf(16);
+	const std::vector<Range> everything(1, Range{0x1000, 0x1010});
+	EXPECT_TRUE(ScanMappedForValue(buf, 0x1000, everything, 0, 1).empty());
 }
 
 } // namespace

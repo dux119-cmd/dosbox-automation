@@ -1,6 +1,7 @@
 // SPDX-FileCopyrightText:  2023-2025 The DOSBox Staging Team
 // SPDX-FileCopyrightText:  2002-2021 The DOSBox Team
 // SPDX-License-Identifier: GPL-2.0-or-later
+// Copyright (C) 2026 dosbox-automation contributors
 
 #include "capture.h"
 
@@ -15,8 +16,10 @@
 #include "private/capture_midi.h"
 #include "private/capture_video.h"
 
+#include "augra/log.h"
 #include "config/config.h"
 #include "config/setup.h"
+#include "dos/programs/mount_policy.h"
 #include "dosbox_config.h"
 #include "gui/mapper.h"
 #include "gui/titlebar.h"
@@ -359,7 +362,7 @@ FILE* CAPTURE_CreateFile(const CaptureType type,
 	return handle;
 }
 
-void CAPTURE_StartVideoCapture(const VideoCaptureMode mode)
+bool CAPTURE_StartVideoCapture(const VideoCaptureMode mode)
 {
 	switch (capture.state.video) {
 	case CaptureState::Off:
@@ -368,12 +371,13 @@ void CAPTURE_StartVideoCapture(const VideoCaptureMode mode)
 
 		capture.state.video = CaptureState::Pending;
 		TITLEBAR_NotifyVideoCaptureStatus(true);
-		break;
+		return true;
 	case CaptureState::Pending:
 	case CaptureState::InProgress:
 		LOG_WARNING("CAPTURE: Already capturing video output");
 		break;
 	}
+	return false;
 }
 
 VideoCaptureMode CAPTURE_GetVideoCaptureMode()
@@ -530,14 +534,78 @@ void CAPTURE_AddMidiData(const bool sysex, const size_t len, const uint8_t* data
 	capture_midi_add_data(sysex, len, data);
 }
 
-void CAPTURE_StartAudioCapture(const std::string& path)
+static std_fs::path resolve_audio_path(const std::string& requested)
 {
-	if (capture.state.audio == CaptureState::Off) {
-		if (!path.empty()) {
-			capture_audio_set_output_path(path);
-		}
-		capture.state.audio = CaptureState::Pending;
+	if (requested.empty() ||
+	    !maybe_create_capture_dir_and_init_capture_indices()) {
+		return {};
 	}
+	std::error_code ec = {};
+	const auto folder  = std_fs::canonical(capture.path, ec);
+	if (ec) {
+		return {};
+	}
+	auto given = std_fs::path(requested);
+	if (given.is_relative()) {
+		given = folder / given;
+	}
+	const auto name = given.filename();
+	if (name.empty() || name == "." || name == "..") {
+		return {};
+	}
+#if defined(WIN32)
+	// A stream of another file or a device is no new file of its own.
+	if (name.string().find(':') != std::string::npos ||
+	    MountPolicy::HasWindowsReservedComponent(name)) {
+		return {};
+	}
+#endif
+	const auto parent = std_fs::canonical(given.parent_path(), ec);
+	if (ec || !MountPolicy::IsUnderAnyRoot(parent, {folder})) {
+		return {};
+	}
+	// Only "not found" means free; a status that fails otherwise refuses.
+	const auto target = parent / name;
+	if (std_fs::symlink_status(target, ec).type() != std_fs::file_type::not_found) {
+		return {};
+	}
+	return target;
+}
+
+bool CAPTURE_StartAudioCapture()
+{
+	if (capture.state.audio != CaptureState::Off) {
+		augra::log_warn("capture", "Already capturing audio output");
+		return false;
+	}
+	capture.state.audio = CaptureState::Pending;
+	return true;
+}
+
+AudioCaptureStart CAPTURE_StartAudioCaptureAt(const std::string& requested,
+                                              std::string& file)
+{
+	if (capture.state.audio != CaptureState::Off) {
+		augra::log_warn("capture", "Already capturing audio output");
+		return AudioCaptureStart::AlreadyCapturing;
+	}
+	// The path conversions throw on a name the platform cannot represent.
+	try {
+		const auto target = resolve_audio_path(requested);
+		if (target.empty()) {
+			return AudioCaptureStart::PathRefused;
+		}
+		auto name = target.string();
+		if (!capture_audio_open_output(target)) {
+			return AudioCaptureStart::PathRefused;
+		}
+		file = std::move(name);
+	} catch (const std::exception&) {
+		capture_audio_discard_output();
+		return AudioCaptureStart::PathRefused;
+	}
+	capture.state.audio = CaptureState::Pending;
+	return AudioCaptureStart::Started;
 }
 
 void CAPTURE_StopAudioCapture()
@@ -545,6 +613,7 @@ void CAPTURE_StopAudioCapture()
 	switch (capture.state.audio) {
 	case CaptureState::Off: break;
 	case CaptureState::Pending:
+		capture_audio_discard_output();
 		capture.state.audio = CaptureState::Off;
 		LOG_MSG("CAPTURE: Cancelled pending audio output capture");
 		break;
@@ -690,6 +759,7 @@ void CAPTURE_Destroy()
 		capture_audio_finalise();
 		capture.state.audio = CaptureState::Off;
 	}
+	capture_audio_discard_output();
 
 	if (capture.state.midi == CaptureState::InProgress) {
 		capture_midi_finalise();

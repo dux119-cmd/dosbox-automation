@@ -208,7 +208,73 @@ TEST_F(UnionDriveTest, ReadsFallThroughAndTheListingMergesBothLayers)
 	uint16_t bs = 0, tc = 0, fc = 0;
 	uint8_t sc = 0;
 	ASSERT_TRUE(union_drive->AllocationInfo(&bs, &sc, &tc, &fc));
-	EXPECT_GT(fc, 0); // the sidecar's free space, not the archive's zero
+	// The sidecar's free space, not the archive's zero.
+	EXPECT_GT(fc, 0);
+}
+
+// The rules of MOUNT -freesize for a directory (mount.cpp), from bytes.
+TEST(UnionDriveAllocation, FollowsTheGeometryOfMountFreesize)
+{
+	constexpr uintmax_t Cluster = 512 * 32;
+	struct Case {
+		uintmax_t free_bytes;
+		uint16_t free_clusters;
+		uint16_t total_clusters;
+	};
+	const std::vector<Case> cases = {
+	        {	         0,     0, 32765},
+	        {       Cluster - 1,     0, 32765},
+	        {           Cluster,     1, 32765},
+	        { 250 * 1024 * 1024, 16000, 32765},
+	        {   32765 * Cluster, 32765, 32765},
+	        {   32766 * Cluster, 32766, 32776},
+	        { 600 * 1024 * 1024, 38400, 38410},
+	        {   65524 * Cluster, 65524, 65534},
+	        {   65525 * Cluster, 65525, 65534},
+	        {1024 * 1024 * 1024, 65534, 65534},
+	        {uintmax_t{5} << 40, 65534, 65534},
+	        {       UINTMAX_MAX, 65534, 65534},
+	};
+	for (const auto& c : cases) {
+		const auto a = UnionDrive::AllocationForFreeBytes(c.free_bytes);
+		EXPECT_EQ(a.bytes_sector, 512) << c.free_bytes;
+		EXPECT_EQ(a.sectors_cluster, 32) << c.free_bytes;
+		EXPECT_EQ(a.free_clusters, c.free_clusters) << c.free_bytes;
+		EXPECT_EQ(a.total_clusters, c.total_clusters) << c.free_bytes;
+	}
+}
+
+TEST_F(UnionDriveTest, ReportsTheFreeSpaceOfTheDiskUnderTheSidecar)
+{
+	std::error_code ec = {};
+	const auto space   = std_fs::space(sidecar, ec);
+	ASSERT_FALSE(ec) << ec.message();
+	// Computed here, not through AllocationForFreeBytes, so a wrong helper
+	// cannot agree with itself.
+	const auto expected_free = std::min<uintmax_t>(space.available / (512 * 32),
+	                                               65534);
+
+	uint16_t bs = 0, tc = 0, fc = 0;
+	uint8_t sc = 0;
+	ASSERT_TRUE(union_drive->AllocationInfo(&bs, &sc, &tc, &fc));
+	EXPECT_EQ(bs, 512);
+	EXPECT_EQ(sc, 32);
+	// Other processes write to the same disk; 64 clusters is 1 MiB.
+	EXPECT_NEAR(fc, static_cast<double>(expected_free), 64);
+	EXPECT_GE(tc, fc);
+}
+
+TEST_F(UnionDriveTest, AVanishedSidecarHasNothingFree)
+{
+	const auto moved = tmp / "sidecar.moved";
+	std_fs::rename(sidecar, moved);
+	uint16_t bs = 0, tc = 0, fc = 0;
+	uint8_t sc          = 0;
+	const bool answered = union_drive->AllocationInfo(&bs, &sc, &tc, &fc);
+	std_fs::rename(moved, sidecar);
+	ASSERT_TRUE(answered);
+	EXPECT_EQ(fc, 0);
+	EXPECT_EQ(tc, 32765);
 }
 
 TEST_F(UnionDriveTest, AWriteCopiesTheMemberUpOnTheFirstWriteNotOnOpen)

@@ -15,11 +15,14 @@
 #include <gmock/gmock.h>
 #include <gtest/gtest.h>
 
+#include "cpu/cpu.h"
+#include "cpu/registers.h"
 #include "dos/dos.h"
 #include "dos/drives.h"
 #include "dos/programs/archive_chooser.h"
 #include "dosbox_test_fixture.h"
 #include "gui/osd/osd_port.h"
+#include "hardware/pic.h"
 #include "hardware/port.h"
 #include "misc/support.h"
 #include "shell/shell.h"
@@ -385,6 +388,17 @@ protected:
 		IO_WriteB(PortCommand, commit);
 	}
 
+	// The bytes of one menu transfer, read the way UniMenu reads them.
+	static std::string Streamed()
+	{
+		IO_WriteB(PortCommand, 0x13);
+		std::string out = {};
+		while (IO_ReadB(PortCommand) == 0x4f && out.size() < 8192) {
+			out.push_back(static_cast<char>(IO_ReadB(PortData)));
+		}
+		return out;
+	}
+
 	static constexpr io_port_t PortCommand = 0x3e0;
 	static constexpr io_port_t PortData    = 0x3e1;
 };
@@ -404,8 +418,54 @@ TEST_F(MenuPortTest, AnOpenSessionAnswersTheSignature)
 // UniMenu typed at the prompt with no menu waiting hung in its read loop.
 TEST_F(MenuPortTest, ATransferWithoutSessionEndsAtOnce)
 {
+	DOS_SetDefaultDrive(DriveC);
 	IO_WriteB(PortCommand, 0x13);
 	EXPECT_EQ(IO_ReadB(PortCommand), 0x14);
+}
+
+// UniMenu started by hand asks with 0x13 and gets the current drive's
+// programs, as MOUNT -run would list them.
+TEST_F(MenuPortTest, ATransferWithoutSessionServesTheCurrentDrive)
+{
+	File("GAME.EXE");
+	File("SETUP.EXE");
+	DOS_SetDefaultDrive(DriveC);
+	const auto expected = ArchiveChooser::SerializeMenu(ArchiveChooser::ProgramMenu(
+	        'C', ArchiveChooser::ScanPrograms('C').entries));
+	EXPECT_EQ(Streamed(), expected);
+	ASSERT_TRUE(MenuSession::IsOpen());
+	EXPECT_NE(MenuSession::LinesFor(0).back(), "EXIT");
+}
+
+// Z: holds the engine's own commands: a hand start there gets no menu.
+TEST_F(MenuPortTest, ATransferWithoutSessionOnTheVirtualDriveEndsAtOnce)
+{
+	File("GAME.EXE");
+	const auto previous_c = Drives.at(DriveC);
+	Drives.at(DriveC)     = std::make_shared<Virtual_Drive>();
+	VFILE_Register("GAME.COM", std::vector<uint8_t>{0xc3});
+	DOS_SetDefaultDrive(DriveC);
+	IO_WriteB(PortCommand, 0x13);
+	EXPECT_EQ(IO_ReadB(PortCommand), 0x14);
+	EXPECT_FALSE(MenuSession::IsOpen());
+	Drives.at(DriveC) = previous_c;
+	VFILE_Remove("GAME.COM");
+}
+
+TEST_F(MenuPortTest, ATransferWithoutSessionServesTheCurrentDrivesChooser)
+{
+	File("GAME.EXE");
+	File("SETUP.EXE");
+	{
+		std::ofstream(tmp / "CHOOSER.TML", std::ios::binary)
+		        << "title = \"Curated\"\n[[entry]]\nlabel = \"Play\"\n"
+		           "exe = \"GAME.EXE\"\n";
+	}
+	Drives.at(DriveC)->EmptyCache();
+	DOS_SetDefaultDrive(DriveC);
+	const auto chooser = ArchiveChooser::ReadChooser('C');
+	ASSERT_TRUE(chooser);
+	EXPECT_EQ(Streamed(), ArchiveChooser::SerializeMenu(*chooser));
 }
 
 TEST_F(MenuPortTest, ATransferServesTheMenuThenEnds)
@@ -481,6 +541,74 @@ TEST_F(MenuPortTest, CancelClosesTheSession)
 	IO_WriteB(PortCommand, 0x12);
 	EXPECT_FALSE(MenuSession::IsOpen());
 	EXPECT_EQ(IO_ReadB(PortCommand), 0xff);
+}
+
+// A guest that writes 13h in a loop must not start a scan each time: an
+// empty result stands for an emulated second.
+TEST_F(MenuPortTest, AnEmptyScanIsNotRepeatedWithinASecond)
+{
+	DOS_SetDefaultDrive(DriveC);
+	IO_WriteB(PortCommand, 0x13);
+	EXPECT_EQ(IO_ReadB(PortCommand), 0x14);
+
+	// A rescan would find the new program and answer 4Fh
+	File("GAME.EXE");
+	int rescans = 0;
+	for (int i = 0; i < 1000; ++i) {
+		IO_WriteB(PortCommand, 0x13);
+		rescans += IO_ReadB(PortCommand) != 0x14 ? 1 : 0;
+	}
+	EXPECT_EQ(rescans, 0);
+
+	PIC_Ticks += 1000;
+	IO_WriteB(PortCommand, 0x13);
+	EXPECT_EQ(IO_ReadB(PortCommand), 0x4f);
+}
+
+TEST_F(MenuPortTest, AnotherDriveIsScannedAtOnce)
+{
+	DOS_SetDefaultDrive(DriveC);
+	IO_WriteB(PortCommand, 0x13);
+	EXPECT_EQ(IO_ReadB(PortCommand), 0x14);
+
+	File("GAME.EXE");
+	Drives.at(DriveC) = MakeDrive();
+	IO_WriteB(PortCommand, 0x13);
+	EXPECT_EQ(IO_ReadB(PortCommand), 0x4f);
+}
+
+// The scan writes a DTA and runs DOS calls, safe from the port handler in real
+// mode only. The port is not used here: in protected mode a port access checks
+// the I/O permission, and the fixture has no descriptor tables.
+TEST_F(MenuSessionTest, OnlyRealModeStartsAScan)
+{
+	File("GAME.EXE");
+	DOS_SetDefaultDrive(DriveC);
+	const auto saved_pmode = cpu.pmode;
+	const auto saved_flags = reg_flags;
+	cpu.pmode              = true;
+	for (const bool v86 : {false, true}) {
+		reg_flags = v86 ? (saved_flags | FLAG_VM) : (saved_flags & ~FLAG_VM);
+		EXPECT_FALSE(MenuSession::OpenForCurrentDrive()) << "v86 " << v86;
+		EXPECT_FALSE(MenuSession::IsOpen()) << "v86 " << v86;
+	}
+	cpu.pmode = saved_pmode;
+	reg_flags = saved_flags;
+	EXPECT_TRUE(MenuSession::OpenForCurrentDrive());
+}
+
+// The scan reads at most MaxScanEntries directory entries, whatever the
+// drive holds.
+TEST_F(MenuSessionTest, TheProgramScanStopsAtItsEntryCap)
+{
+	for (size_t i = 0; i < ArchiveChooser::MaxScanEntries + 100; ++i) {
+		std::ofstream(tmp / ("F" + std::to_string(i) + ".DAT"),
+		              std::ios::binary)
+		        << "x";
+	}
+	Drives.at(DriveC)->EmptyCache();
+	const auto scan = ArchiveChooser::ScanPrograms('C');
+	EXPECT_EQ(scan.entries_read, ArchiveChooser::MaxScanEntries);
 }
 
 } // namespace

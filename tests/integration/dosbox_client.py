@@ -2,10 +2,19 @@
 # License: GPL-2.0-or-later. Contact: dosbox-automation-project@trinity2k.net
 #
 
+import contextlib
+import re
 import time
+from collections.abc import Iterator
 from pathlib import Path
 
 import requests
+
+# The shell's prompt with nothing typed behind it, as in 'Z:\>'.
+BARE_PROMPT = re.compile(r"[A-Za-z]:\\[^>]*>")
+
+# What a wait polls through: the engine not up yet, or slow to answer.
+NOT_ANSWERING = (requests.ConnectionError, requests.Timeout)
 
 
 class DosboxClient:
@@ -14,6 +23,8 @@ class DosboxClient:
     def __init__(self, base_url: str, token: str = "", timeout: float = 10.0):
         self.base_url = base_url.rstrip("/")
         self.timeout = timeout
+        self.busy_deadline_s = 30.0
+        self._wait_deadline: float | None = None
         self.session = requests.Session()
         self.session.headers["Host"] = "127.0.0.1"
         if token:
@@ -22,14 +33,48 @@ class DosboxClient:
     def _url(self, path: str) -> str:
         return f"{self.base_url}{path}"
 
+    @contextlib.contextmanager
+    def _until(self, deadline: float) -> Iterator[None]:
+        """Requests inside a wait end with the wait: resending and reading
+        stop at its deadline, not at the client's own."""
+        outer = self._wait_deadline
+        self._wait_deadline = deadline if outer is None else min(outer, deadline)
+        try:
+            yield
+        finally:
+            self._wait_deadline = outer
+
+    def _request_timeout(self) -> float:
+        if self._wait_deadline is None:
+            return self.timeout
+        return max(0.05, min(self.timeout, self._wait_deadline - time.monotonic()))
+
+    def _send(self, method: str, path: str, **kwargs) -> requests.Response:
+        """Busy is 503 with Retry-After: the emulation thread never ran the
+        command, so it goes again (ada-n0vh)."""
+        deadline = time.monotonic() + self.busy_deadline_s
+        if self._wait_deadline is not None:
+            deadline = min(deadline, self._wait_deadline)
+        while True:
+            r = self.session.request(method, self._url(path),
+                                     timeout=self._request_timeout(), **kwargs)
+            retry_after = r.headers.get("Retry-After")
+            if r.status_code != 503 or retry_after is None or time.monotonic() >= deadline:
+                return r
+            try:
+                pause_s = float(retry_after)
+            except ValueError:
+                pause_s = 1.0
+            time.sleep(min(max(pause_s, 0.0), 1.0))
+
     def _get(self, path: str, **kwargs) -> requests.Response:
-        return self.session.get(self._url(path), timeout=self.timeout, **kwargs)
+        return self._send("GET", path, **kwargs)
 
     def _post(self, path: str, **kwargs) -> requests.Response:
-        return self.session.post(self._url(path), timeout=self.timeout, **kwargs)
+        return self._send("POST", path, **kwargs)
 
     def _put(self, path: str, **kwargs) -> requests.Response:
-        return self.session.put(self._url(path), timeout=self.timeout, **kwargs)
+        return self._send("PUT", path, **kwargs)
 
     # --- Status & Info ---
 
@@ -261,6 +306,23 @@ class DosboxClient:
     def memory_free(self, addr: int) -> requests.Response:
         return self._post("/api/v1/memory/free", json={"addr": addr})
 
+    def memory_search(self, start: int, end: int, value: int,
+                      width: int = 1) -> requests.Response:
+        return self._post(
+            "/api/v1/memory/search",
+            json={"start": start, "end": end, "value": value, "width": width},
+        )
+
+    def memory_freeze(self, address: int, value: int,
+                      width: int = 1) -> requests.Response:
+        return self._post(
+            "/api/v1/memory/freeze",
+            json={"address": address, "value": value, "width": width},
+        )
+
+    def memory_freeze_clear(self) -> requests.Response:
+        return self._send("DELETE", "/api/v1/memory/freeze")
+
     # --- Control ---
 
     def shutdown(self) -> requests.Response:
@@ -270,40 +332,68 @@ class DosboxClient:
 
     def wait_ready(self, timeout: float = 10.0):
         """Ready means the webserver answers and the emulation thread
-        serves a command: during start-up a screen read answers 500 from
-        the Bridge's 250 ms command timeout (2026-10-09)."""
+        serves a command. Until it does, a screen read answers 503 busy,
+        which _send resends, so this waits for a 200."""
         deadline = time.monotonic() + timeout
-        while time.monotonic() < deadline:
-            try:
-                if (self.status().status_code == 200
-                        and self.screen_text().status_code == 200):
-                    return
-            except requests.ConnectionError:
-                pass
-            time.sleep(0.2)
+        with self._until(deadline):
+            while time.monotonic() < deadline:
+                try:
+                    if (self.status().status_code == 200
+                            and self.screen_text().status_code == 200):
+                        return
+                except NOT_ANSWERING:
+                    pass
+                time.sleep(0.2)
         raise TimeoutError(f"DOSBox not ready after {timeout}s")
 
     def wait_program(self, name: str, timeout: float = 15.0):
         deadline = time.monotonic() + timeout
-        while time.monotonic() < deadline:
-            r = self.program_state()
-            if r.status_code == 200:
-                state = r.json()
-                if name.lower() in state.get("segment_name", "").lower():
-                    return state
-            time.sleep(0.5)
+        with self._until(deadline):
+            while time.monotonic() < deadline:
+                r = self.program_state()
+                if r.status_code == 200:
+                    state = r.json()
+                    if name.lower() in state.get("segment_name", "").lower():
+                        return state
+                time.sleep(0.5)
         raise TimeoutError(f"Program '{name}' not detected after {timeout}s")
 
     def wait_shell(self, timeout: float = 15.0):
         deadline = time.monotonic() + timeout
-        while time.monotonic() < deadline:
-            r = self.program_state()
-            if r.status_code == 200:
-                state = r.json()
-                if state.get("is_shell"):
-                    return state
-            time.sleep(0.5)
+        with self._until(deadline):
+            while time.monotonic() < deadline:
+                r = self.program_state()
+                if r.status_code == 200:
+                    state = r.json()
+                    if state.get("is_shell"):
+                        return state
+                time.sleep(0.5)
         raise TimeoutError(f"Shell not detected after {timeout}s")
+
+    def wait_autoexec_done(self, timeout: float = 120.0) -> str:
+        """is_shell stays true all through the autoexec, so the screen decides."""
+        deadline = time.monotonic() + timeout
+        text = ""
+        seen = None
+        with self._until(deadline):
+            while time.monotonic() < deadline:
+                done = None
+                try:
+                    status = self.status()
+                    if status.status_code == 200 and "archive" not in status.json():
+                        r = self.screen_text()
+                        if r.status_code == 200:
+                            text = r.json()["text"]
+                            lines = [ln.rstrip() for ln in text.split("\n") if ln.strip()]
+                            if lines and BARE_PROMPT.fullmatch(lines[-1]):
+                                done = text
+                except NOT_ANSWERING:
+                    pass
+                if done is not None and done == seen:
+                    return done
+                seen = done
+                time.sleep(0.2)
+        raise TimeoutError(f"autoexec not done after {timeout}s:\n{text}")
 
     def get_with_host(self, path: str, host: str) -> requests.Response:
         headers = {"Host": host}
@@ -349,13 +439,14 @@ class DosboxClient:
 
     def wait_script_done(self, timeout: float = 30.0) -> dict:
         deadline = time.monotonic() + timeout
-        while time.monotonic() < deadline:
-            r = self.script_status()
-            if r.status_code == 200:
-                data = r.json()
-                if data["state"] in ("completed", "error"):
-                    return data
-            time.sleep(0.2)
+        with self._until(deadline):
+            while time.monotonic() < deadline:
+                r = self.script_status()
+                if r.status_code == 200:
+                    data = r.json()
+                    if data["state"] in ("completed", "error"):
+                        return data
+                time.sleep(0.2)
         # Stop the still-running script before giving up. A module-scoped
         # fixture is shared across tests, so a script left running would make
         # every later script_load return 400 "a script is already running" and

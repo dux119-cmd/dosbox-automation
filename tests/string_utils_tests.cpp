@@ -755,3 +755,24 @@ TEST(Join, NonEmptyVector_CustomFormat2)
 }
 
 } // namespace
+
+TEST(EscapeControlBytes, ControlBytesBecomeHexAndTheRestStays)
+{
+	EXPECT_EQ(escape_control_bytes("a\x1b[2Jb\x07\x7f c"),
+	          "a\\x1b[2Jb\\x07\\x7f c");
+	EXPECT_EQ(escape_control_bytes("plain"), "plain");
+	EXPECT_EQ(escape_control_bytes(""), "");
+}
+
+// The Windows restart passes paths and values with blanks; a backslash
+// before a quote must not swallow it.
+TEST(QuoteWindowsArgument, SurvivesCommandLineToArgvW)
+{
+	EXPECT_EQ(quote_windows_argument("plain"), "\"plain\"");
+	EXPECT_EQ(quote_windows_argument(""), "\"\"");
+	EXPECT_EQ(quote_windows_argument("modem listenport:5000"), "\"modem listenport:5000\"");
+	EXPECT_EQ(quote_windows_argument("C:\\Games\\"), "\"C:\\Games\\\\\"");
+	EXPECT_EQ(quote_windows_argument("a\"b"), "\"a\\\"b\"");
+	EXPECT_EQ(quote_windows_argument("a\\\"b"), "\"a\\\\\\\"b\"");
+	EXPECT_EQ(quote_windows_argument("C:\\x\\y"), "\"C:\\x\\y\"");
+}

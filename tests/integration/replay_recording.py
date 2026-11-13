@@ -123,7 +123,7 @@ def main():
 
     try:
         client.wait_ready(timeout=10)
-        client.wait_shell(timeout=10)
+        client.wait_autoexec_done()
         print("DOSBox ready. Sending recording as bulk replay...")
 
         client.capture_frame(shots_dir / "00-before-replay.jpg")

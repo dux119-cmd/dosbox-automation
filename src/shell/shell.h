@@ -8,10 +8,12 @@
 
 #include "dosbox.h"
 
+#include <functional>
 #include <memory>
 #include <optional>
 #include <stack>
 #include <string>
+#include <string_view>
 #include <vector>
 
 #include "cpu/callback.h"
@@ -87,6 +89,7 @@ public:
 private:
 	std::vector<std::string> commands{};
 	std_fs::path path;
+	bool changed = false;
 };
 
 class DOS_Shell : public Program {
@@ -211,6 +214,18 @@ bool SHELL_IsRunning();
 // One set at a time: refused while a set is waiting, when empty, or when a
 // line has control characters or does not fit a command line.
 bool SHELL_QueuePendingCommands(std::vector<std::string> lines);
+
+// Lines that run as a batch file's do (a package's [autoexec]): % expanded,
+// labels for GOTO, stray control bytes and long lines as the batch reader
+// treats them. on_end runs when that batch is done.
+bool SHELL_QueuePendingBatch(std::vector<std::string> lines,
+                             std::function<void()> on_end = {});
+
+// A set of queued lines waits for the shell to take it.
+bool SHELL_PendingCommandsWaiting();
+
+// A command of the shell itself, such as CD or EXIT, in any case.
+bool SHELL_IsBuiltin(std::string_view name);
 std::vector<std::string> SHELL_TakePendingCommands();
 
 #endif

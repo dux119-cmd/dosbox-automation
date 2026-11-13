@@ -34,6 +34,8 @@
 
 void Set_Label(const char* const input, char* const output, bool cdrom);
 std::string To_Label(const char* name);
+// A label kept in 8.3 form as the 11 bytes of its root entry, blank padded.
+std::string LabelAsRootEntryName(std::string_view label);
 bool filename_not_8x3(const char *n);
 bool filename_not_strict_8x3(const char *n);
 
@@ -220,6 +222,10 @@ public:
 	bool IsRemovable(void) override;
 	Bits UnMount(void) override;
 	void EmptyCache(void) override {}
+	bool SetVolumeLabel(const std::string& name) override;
+	bool DeleteVolumeLabel() override;
+	std::optional<uint32_t> GetSerial() override;
+	std::string LabelOnMedium() override;
 
 public:
 	uint8_t readSector(uint32_t sectnum, void * data);
@@ -249,6 +255,7 @@ private:
 	                     uint32_t* dirClust, uint32_t* subEntry,
 	                     const bool dir_ok = false);
 	bool addDirectoryEntry(uint32_t dirClustNumber, direntry useEntry);
+	std::optional<int32_t> FindRootLabelIndex();
 	void zeroOutCluster(uint32_t clustNumber);
 	bool getEntryName(const char *fullname, char *entname);
 
@@ -287,6 +294,14 @@ public:
 	bool IsRemote(void) override;
 	bool IsRemovable(void) override;
 	Bits UnMount(void) override;
+	bool SetVolumeLabel(const std::string&) override
+	{
+		return false;
+	}
+	bool DeleteVolumeLabel() override
+	{
+		return false;
+	}
 
 private:
 	uint8_t subUnit;
@@ -397,6 +412,14 @@ public:
 	const char* GetLabel() override
 	{
 		return discLabel;
+	}
+	bool SetVolumeLabel(const std::string&) override
+	{
+		return false;
+	}
+	bool DeleteVolumeLabel() override
+	{
+		return false;
 	}
 	void Activate(void) override;
 
@@ -530,6 +553,8 @@ public:
 	bool IsRemovable() override;
 	Bits UnMount() override;
 	const char* GetLabel() override;
+	bool SetVolumeLabel(const std::string& name) override;
+	bool DeleteVolumeLabel() override;
 
 	// The search without a DTA: dir and pattern as DOS hands them to
 	// FindFirst ("" is the root; the pattern is NAME.EXT with wildcards,
@@ -566,6 +591,8 @@ public:
 
 	const ArchiveMount::ArchiveSource& Source() const;
 	const ArchiveMount::ArchiveTree& Tree() const;
+	// The archive with the chain to the drive's level, as MOUNT names it.
+	const std::string& SourcePath() const;
 	int64_t RetainedMemoryBytes() const;
 
 private:
@@ -589,6 +616,16 @@ public:
 	                                          const ArchiveMount::SidecarRecord& identity,
 	                                          std::string* error);
 	~UnionDrive() override;
+
+	struct Allocation {
+		uint16_t bytes_sector   = 512;
+		uint8_t sectors_cluster = 32;
+		uint16_t total_clusters = 32765;
+		uint16_t free_clusters  = 0;
+	};
+	// The geometry MOUNT -freesize gives a directory, for the bytes free
+	// on the disk under the sidecar: 16 KiB clusters, at most 65534 free.
+	static Allocation AllocationForFreeBytes(uintmax_t free_bytes);
 
 	std::unique_ptr<DOS_File> FileOpen(const char* name, uint8_t flags) override;
 	std::unique_ptr<DOS_File> FileCreate(const char* name,
@@ -620,7 +657,11 @@ public:
 	// copy; an open handle on a lower file looks again only then.
 	uint64_t SidecarGeneration() const;
 	bool InSidecar(const char* name);
+	// The sidecar's host file for a DOS name, "" when it is not there.
+	std::string HostPathOf(const char* name);
 	const char* GetLabel() override;
+	bool SetVolumeLabel(const std::string& name) override;
+	bool DeleteVolumeLabel() override;
 
 	// Writes the record now when it is dirty. Also runs two seconds
 	// after the last change and at unmount.
@@ -685,6 +726,14 @@ public:
 	bool IsRemovable() override;
 	Bits UnMount() override;
 	const char* GetLabel() override;
+	bool SetVolumeLabel(const std::string&) override
+	{
+		return false;
+	}
+	bool DeleteVolumeLabel() override
+	{
+		return false;
+	}
 
 private:
 	Virtual_Drive(const Virtual_Drive&); // prevent copying

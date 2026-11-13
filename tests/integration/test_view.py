@@ -154,14 +154,16 @@ def test_short_file_shows_and_q_restores_the_screen(view_env):
     assert "VIEW test file, short." in text
     assert "Col     after one tab           after two more" in text
     assert "File: short.txt" in text
-    assert " 1Help" in text and " 3Quit" in text and "10Quit" in text
+    assert " 1Help" in text and " 3Next" in text and "10Quit" in text
+    assert " 4Hex" in text
+    assert "F1 Help" not in text
 
     text = quit_view(client)
     assert "\nMARKER\n" in text
-    assert "VIEW.COM 1.0 - simple text viewer" in text
+    assert "simple text viewer" not in text, f"banner on a normal start:\n{text}"
 
 
-@pytest.mark.parametrize("quit_key", ["KBD_esc", "KBD_f3", "KBD_f10"])
+@pytest.mark.parametrize("quit_key", ["KBD_esc", "KBD_f10"])
 def test_other_quit_keys(view_env, quit_key):
     client = view_env()
     run_view(client, "short.txt", "Line 001 / 004")
@@ -223,6 +225,18 @@ def test_h_toggles_hex_on_a_text_file(view_env):
     wait_text(client, "Line 001 / 004")
 
 
+def test_f4_toggles_hex_like_h(view_env):
+    client = view_env()
+    run_view(client, "short.txt", "Line 001 / 004")
+
+    key(client, "KBD_f4")
+    text = wait_text(client, "Byte 000 / 170")
+    assert "00000000  56 49 45 57" in text
+
+    key(client, "KBD_f4")
+    wait_text(client, "Line 001 / 004")
+
+
 def test_hex_option_forces_hex(view_env):
     client = view_env()
     run_view(client, "short.txt /h", "Byte 000 / 170")
@@ -243,6 +257,10 @@ def test_search_highlights_and_navigates(view_env):
     type_text(client, "n")
     wait_for(lambda: attrs(client, COLOUR_TEXT, 3, 25, 5) == [0x4F] * 5, "current hit on row 3")
     assert attrs(client, COLOUR_TEXT, 2, 25, 5) == [0x0E] * 5
+
+    key(client, "KBD_f3")
+    wait_for(lambda: attrs(client, COLOUR_TEXT, 4, 25, 5) == [0x4F] * 5, "F3: current hit on row 4")
+    assert attrs(client, COLOUR_TEXT, 3, 25, 5) == [0x0E] * 5
 
     type_text(client, "P")
     wait_text(client, "Line 1078 / 1100")
@@ -300,6 +318,38 @@ def test_ctrl_l_refuses_a_device(view_env):
     wait_text(client, "Cannot open con")
 
 
+# A DOS pipe is COMMAND.COM's temporary file on standard input (ada-9wn6).
+@pytest.mark.parametrize("command", ["type short.txt | view", "view < short.txt"])
+def test_standard_input_shows_as_stdin(view_env, command):
+    client = view_env()
+    type_text(client, f"{command}\n")
+    text = wait_text(client, "Line 001 / 004")
+    assert "File: <stdin>" in text
+    assert "VIEW test file, short." in text
+    assert "\nMARKER\n" in quit_view(client)
+
+
+def test_an_empty_pipe_opens(view_env):
+    client = view_env()
+    type_text(client, "type nul | view\n")
+    text = wait_text(client, "File: <stdin>")
+    assert "10Quit" in text
+    assert "\nMARKER\n" in quit_view(client)
+
+
+def test_ctrl_l_goes_from_stdin_to_a_file(view_env):
+    client = view_env()
+    type_text(client, "type short.txt | view\n")
+    wait_text(client, "File: <stdin>")
+
+    key(client, "KBD_l", "KBD_leftctrl")
+    wait_text(client, "Load:")
+    type_text(client, "lf.txt\n")
+    text = wait_text(client, "Line 001 / 003")
+    assert "File: lf.txt" in text
+    assert "\nMARKER\n" in quit_view(client)
+
+
 def test_ctrl_l_opens_another_file(view_env):
     client = view_env()
     run_view(client, "short.txt", "Line 001 / 004")
@@ -316,10 +366,47 @@ def test_help_and_back(view_env):
     run_view(client, "short.txt", "Line 001 / 004")
 
     key(client, "KBD_f1")
-    wait_text(client, "VIEW 1.0 help - any key returns")
-    wait_text(client, "SJ-ACC-0650")
+    # the title row is drawn first, the licence lines close the page
+    text = wait_text(client, "at github.com/open-watcom")
+    assert "VIEW 1.3 help - any key returns" in text, text
+    assert "SJ-ACC-0650-20261108" in text, text
+    assert "ABSOLUTELY NO WARRANTY" in text, text
+    assert "GNU General Public License" in text, text
+    assert "dosbox-automation.org" in text, text
+    assert "Sybase Open Watcom Public License" in text, text
     key(client, "KBD_space")
     wait_text(client, "Line 001 / 004")
+
+
+def test_help_shows_the_whole_notice_at_forty_columns(view_env):
+    """F1 is the only place VIEW shows its licence."""
+    client = view_env(extra_lines=["MODE CO40"])
+    type_text(client, "view short.txt\n")
+    wait_text(client, "VIEW test file")
+
+    key(client, "KBD_f1")
+    text = wait_text(client, "github.com/open-watcom")
+    for needle in ("ABSOLUTELY NO WARRANTY", "gnu.org/licenses/gpl-3.0",
+                   "dosbox-automation.org", "Watcom Public License 1.0", "SJ-ACC-0650"):
+        assert needle in text, text
+    key(client, "KBD_space")
+    wait_text(client, "VIEW test file")
+
+
+def test_slash_question_shows_the_banner_and_the_licence(view_env):
+    client = view_env()
+    type_text(client, "view /?\n")
+    text = wait_text(client, "ABSOLUTELY NO WARRANTY")
+    assert "VIEW.COM 1.3 - simple text viewer" in text, text
+    assert "VIEW.COM [filename] [/?] [/H] [/M]" in text, text
+    assert "Without a filename, VIEW shows what is piped in: TYPE FILE.TXT | VIEW" in text, text
+
+
+def test_a_missing_file_shows_the_banner(view_env):
+    client = view_env()
+    type_text(client, "view nosuch.txt\n")
+    text = wait_text(client, "VIEW: cannot open nosuch.txt")
+    assert "VIEW.COM 1.3 - simple text viewer" in text, text
 
 
 def test_ctrl_z_ends_the_text(view_env):
@@ -368,7 +455,8 @@ def test_cga_uses_the_colour_table(view_env):
 
 
 @pytest.mark.parametrize("args, code", [
-    ("", 1), ("/x f", 1), ("nosuch.txt", 2), ("con", 2), ("/?", 0), ("short.txt /h /m /?", 0),
+    ("", 1), ("< nul", 1), ("/x f", 1), ("nosuch.txt", 2), ("con", 2), ("/?", 0),
+    ("short.txt /h /m /?", 0),
 ])
 def test_exit_codes(view_env, args, code):
     client = view_env()

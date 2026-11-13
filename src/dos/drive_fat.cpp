@@ -4,16 +4,19 @@
 
 #include "dos/drives.h"
 
+#include <algorithm>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
 #include <ctime>
+#include <string_view>
 
 #include "dos.h"
 #include "dos/programs/mount_policy.h"
 #include "ints/bios.h"
 #include "ints/bios_disk.h"
 #include "misc/support.h"
+#include "utils/mem_unaligned.h"
 #include "utils/string_utils.h"
 
 #define IMGTYPE_FLOPPY 0
@@ -25,6 +28,14 @@
 #define FAT32		   2
 
 static constexpr uint16_t BytePerSector = 512;
+
+namespace {
+constexpr uint8_t DeletedEntryMark   = 0xe5;
+constexpr uint8_t LongNameAttributes = 0x0f;
+// Microsoft FAT specification, DIR_Name[0]: a name that begins with E5h is
+// stored as 05h, since E5h marks a free entry.
+constexpr uint8_t StoredE5hMark = 0x05;
+} // namespace
 
 class fatFile final : public DOS_File {
 public:
@@ -69,6 +80,9 @@ static void convToDirFile(char *filename, char *filearray) {
 		} else {
 			charidx = 8;
 		}
+	}
+	if (static_cast<uint8_t>(filearray[0]) == DeletedEntryMark) {
+		filearray[0] = static_cast<char>(StoredE5hMark);
 	}
 }
 
@@ -1275,7 +1289,13 @@ bool fatDrive::FindFirst(const char *_dir, DOS_DTA &dta,bool /*fcb_findfirst*/) 
 	if (FatAttributeFlags(attr).volume) //check for root dir or fcb_findfirst
 		LOG(LOG_DOSMISC,LOG_WARN)("findfirst for volumelabel used on fatDrive. Unhandled.");
 #endif
-	if(!getDirClustNum(_dir, &cwdDirCluster, false)) {
+	FatAttributeFlags search_attr       = {};
+	char search_pattern[DOS_NAMELENGTH_ASCII] = {};
+	dta.GetSearchParams(search_attr, search_pattern);
+	// RBIL INT 21h AH=11h: the volume attribute alone finds the label from
+	// any directory
+	const auto dir = (search_attr == FatAttributeFlags::Volume) ? "" : _dir;
+	if (!getDirClustNum(dir, &cwdDirCluster, false)) {
 		DOS_SetError(DOSERR_PATH_NOT_FOUND);
 		return false;
 	}
@@ -1284,28 +1304,16 @@ bool fatDrive::FindFirst(const char *_dir, DOS_DTA &dta,bool /*fcb_findfirst*/) 
 	return FindNextInternal(cwdDirCluster, dta, &dummyClust);
 }
 
-char* removeTrailingSpaces(char* str, const size_t max_len) {
-	const auto str_len = strnlen(str, max_len);
-	if (str_len == 0)
-		return str;
-
-	char* end = str + str_len;
-	while((*--end == ' ') && (end > str)) {
-		/* do nothing; break on while criteria */
+static char* removeTrailingSpaces(char* str, const size_t max_len)
+{
+	auto str_len = strnlen(str, max_len);
+	while (str_len > 0 && str[str_len - 1] == ' ') {
+		--str_len;
 	}
-	*++end = '\0';
+	if (str_len < max_len) {
+		str[str_len] = '\0';
+	}
 	return str;
-}
-
-char* removeLeadingSpaces(char* str, const size_t max_len) {
-	const size_t len = strnlen(str, max_len);
-	const size_t pos = strspn(str, " ");
-	memmove(str, str + pos, len - pos + 1);
-	return str;
-}
-
-char* trimString(char* str, const size_t max_len) {
-	return removeTrailingSpaces(removeLeadingSpaces(str, max_len), max_len);
 }
 
 static void copyDirEntry(const direntry *src, direntry *dst) {
@@ -1373,8 +1381,12 @@ nextfile:
 	memset(extension,0,4);
 	memcpy(find_name, &sectbuf[entryoffset].entryname[0], 8); //-V1086
 	memcpy(extension,&sectbuf[entryoffset].entryname[8],3);
-	trimString(&find_name[0], sizeof(find_name));
-	trimString(&extension[0], sizeof(extension));
+	if (static_cast<uint8_t>(find_name[0]) == StoredE5hMark) {
+		find_name[0] = static_cast<char>(DeletedEntryMark);
+	}
+	// MS-DOS 4.0 SEARCH.ASM PackName cuts trailing blanks only
+	removeTrailingSpaces(&find_name[0], sizeof(find_name));
+	removeTrailingSpaces(&extension[0], sizeof(extension));
 
 	const auto entry_attributes = FatAttributeFlags(sectbuf[entryoffset].attrib);
 
@@ -1387,7 +1399,10 @@ nextfile:
 
 	// TODO What about volume/directory attributes?
 	if (attrs == FatAttributeFlags::Volume) {
-		if (!entry_attributes.volume) {
+		// A long name piece (0Fh) carries the volume bit too
+		constexpr uint8_t LongNamePiece = 0x0f;
+		if (!entry_attributes.volume ||
+		    sectbuf[entryoffset].attrib == LongNamePiece) {
 			goto nextfile;
 		}
 		dirCache.SetLabel(find_name, false, true);
@@ -1581,6 +1596,111 @@ bool fatDrive::addDirectoryEntry(uint32_t dirClustNumber, direntry useEntry) {
 		}
 	}
 
+	return true;
+}
+
+// DOS 4.0 extended BPB: signature 29h at 26h, serial at 27h; bootcode
+// starts at 24h. FAT32 keeps them at 42h/43h, which this drive never mounts.
+std::optional<uint32_t> fatDrive::GetSerial()
+{
+	constexpr uint8_t ExtendedBpbSignature = 0x29;
+	if (bootbuffer.bootcode[2] != ExtendedBpbSignature) {
+		return {};
+	}
+	return host_to_le(read_unaligned_uint32(&bootbuffer.bootcode[3]));
+}
+
+std::optional<int32_t> fatDrive::FindRootLabelIndex()
+{
+	direntry entry = {};
+	for (int32_t i = 0; directoryBrowse(0, &entry, i, i); ++i) {
+		const FatAttributeFlags attr = entry.attrib;
+		if (entry.entryname[0] != DeletedEntryMark && attr.volume &&
+		    entry.attrib != LongNameAttributes) {
+			return i;
+		}
+	}
+	return {};
+}
+
+std::string fatDrive::LabelOnMedium()
+{
+	const auto index = FindRootLabelIndex();
+	direntry entry   = {};
+	if (!index || !directoryBrowse(0, &entry, *index, *index)) {
+		return {};
+	}
+	auto part = [&](const size_t from, const size_t chars) {
+		std::string out(reinterpret_cast<const char*>(entry.entryname) + from, chars);
+		while (!out.empty() && out.back() == ' ') {
+			out.pop_back();
+		}
+		return out;
+	};
+	auto base       = part(0, 8);
+	const auto ext  = part(8, 3);
+	if (!base.empty() && static_cast<uint8_t>(base[0]) == StoredE5hMark) {
+		base[0] = static_cast<char>(DeletedEntryMark);
+	}
+	return ext.empty() ? base : base + "." + ext;
+}
+
+// MS-DOS 4.0 LABEL keeps the label as a root entry: 11 bytes, no dot,
+// attribute 08h; the boot sector's copy stays as it is (ada-9j99).
+bool fatDrive::SetVolumeLabel(const std::string& name)
+{
+	if (IsReadOnly() || !IsDosLabelForm(name)) {
+		return false;
+	}
+	direntry entry = {};
+	std::memset(entry.entryname, ' ', sizeof(entry.entryname));
+	const auto dot  = name.find('.');
+	const auto base = std::string_view(name).substr(0, dot);
+	const auto ext  = dot == std::string::npos
+	                        ? std::string_view()
+	                        : std::string_view(name).substr(dot + 1);
+	for (size_t i = 0; i < std::min<size_t>(base.size(), 8); ++i) {
+		entry.entryname[i] = static_cast<uint8_t>(
+		        toupper(static_cast<unsigned char>(base[i])));
+	}
+	for (size_t i = 0; i < std::min<size_t>(ext.size(), 3); ++i) {
+		entry.entryname[8 + i] = static_cast<uint8_t>(
+		        toupper(static_cast<unsigned char>(ext[i])));
+	}
+	if (entry.entryname[0] == DeletedEntryMark) {
+		entry.entryname[0] = StoredE5hMark;
+	}
+	entry.attrib  = FatAttributeFlags::Volume;
+	entry.modTime = DOS_GetBiosTimePacked();
+	entry.modDate = DOS_GetBiosDatePacked();
+
+	if (const auto index = FindRootLabelIndex()) {
+		if (!directoryChange(0, &entry, *index)) {
+			return false;
+		}
+	} else if (!addDirectoryEntry(0, entry)) {
+		return false;
+	}
+	dirCache.ReplaceLabel(name.c_str());
+	return true;
+}
+
+bool fatDrive::DeleteVolumeLabel()
+{
+	if (IsReadOnly()) {
+		return false;
+	}
+	if (const auto index = FindRootLabelIndex()) {
+		direntry entry = {};
+		if (!directoryBrowse(0, &entry, *index, *index)) {
+			return false;
+		}
+		entry.entryname[0] = DeletedEntryMark;
+		if (!directoryChange(0, &entry, *index)) {
+			return false;
+		}
+	}
+	dirCache.ReplaceLabel("");
 	return true;
 }
 

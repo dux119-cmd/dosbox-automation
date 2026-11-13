@@ -132,6 +132,9 @@ void port_write(const io_port_t port, const io_val_t val, const io_width_t width
 	case Command::ClearOverlay:
 	case Command::DiscardBuffer: overlay_command(command); break;
 	case Command::MenuDataBegin:
+		if (!MenuSession::IsOpen()) {
+			MenuSession::OpenForCurrentDrive();
+		}
 		MenuSession::Rewind();
 		transfer_active = true;
 		break;

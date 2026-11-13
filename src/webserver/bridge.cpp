@@ -7,6 +7,7 @@
 #include <algorithm>
 #include <chrono>
 #include <mutex>
+#include <string>
 #include <vector>
 
 namespace Webserver {
@@ -38,17 +39,35 @@ void Bridge::ExecuteCommand(Command& cmd, const uint32_t timeout_ms)
 		if (it != queue.end()) {
 			queue.erase(it);
 		}
-		throw std::runtime_error("Failed to execute command: timeout");
+		throw BridgeBusy("the emulation thread did not take the command within " +
+		                 std::to_string(timeout_ms) + " ms");
 	}
 }
 
 void Bridge::ProcessRequests()
 {
+	// A command that runs the machine (a guest page fault, a DOS callback)
+	// comes back here on this thread while the queue is still locked by it.
+	static thread_local bool processing = false;
+	if (processing) {
+		return;
+	}
 	std::lock_guard<std::mutex> lock(mtx);
 
 	if (queue.empty()) {
 		return;
 	}
+	struct ProcessingScope {
+		ProcessingScope()
+		{
+			processing = true;
+		}
+		~ProcessingScope()
+		{
+			processing = false;
+		}
+	} const processing_scope;
+
 	for (auto* cmd : queue) {
 		cmd->Execute();
 		cmd->done = true;

@@ -60,6 +60,8 @@ add_executable(dosbox_tests
     archive_random_name_tests.cpp
     archive_reader_tests.cpp
     archive_window_tests.cpp
+    config_program_tests.cpp
+    config_text_tests.cpp
     archive_toml_tests.cpp
     archive_tree_tests.cpp
     archive_zip_central_directory_tests.cpp
@@ -102,16 +104,22 @@ add_executable(dosbox_tests
     gus_dma_tests.cpp
     hardware_audio_gus_tests.cpp
     hardware_network_ipx_tests.cpp
+    serial_loopback_tests.cpp
     i8042_wide_read_tests.cpp
     int10_modes_tests.cpp
     ipx_setting_tests.cpp
     joystick_reinit_tests.cpp
+    label_tests.cpp
     language_territory_tests.cpp
     math_utils_tests.cpp
     messages_adjust_tests.cpp
     mixer_tests.cpp
     mode_symbolic_tests.cpp
     archive_chooser_tests.cpp
+    package_autoexec_tests.cpp
+    package_runtime_tests.cpp
+    package_start_tests.cpp
+    package_profile_tests.cpp
     menu_session_tests.cpp
     mount_archive_tests.cpp
     mount_run_tests.cpp
@@ -132,19 +140,29 @@ add_executable(dosbox_tests
     shell_args_tests.cpp
     shell_banner_tests.cpp
     shell_cmds_tests.cpp
+    shell_history_tests.cpp
     shell_redirection_tests.cpp
     string_utils_tests.cpp
     # stubs.cpp
     support_tests.cpp
+    test_home.cpp
+    test_home.h
+    test_home_tests.cpp
     test_temp_dir.h
     test_temp_dir_tests.cpp
     truetype_character_block_tests.cpp
     truetype_tests.cpp
     unicode_tests.cpp
+    volume_label_tests.cpp
     webserver_auth_tests.cpp
+    capture_audio_tests.cpp
+    conf_anchor_tests.cpp
+    host_only_tests.cpp
+    webserver_bridge_tests.cpp
     webserver_tools_tests.cpp
     webserver_tool_launch_tests.cpp
     host_browser_tests.cpp
+    home_folders_tests.cpp
     host_layout_table_tests.cpp
     docs_location_tests.cpp
     osd_tests.cpp
@@ -157,6 +175,9 @@ add_executable(dosbox_tests
     text_input_tests.cpp
     webserver_mem_search_tests.cpp
     webserver_freeze_tests.cpp
+    guest_memory_tests.cpp
+    webserver_memory_paging_tests.cpp
+    guest_memory_callers_tests.cpp
     webserver_dos_map_tests.cpp
     webserver_io_port_tests.cpp
     webserver_cpu_write_tests.cpp
@@ -166,6 +187,7 @@ add_executable(dosbox_tests
     one_process_hint_tests.cpp
     zmbv_tests.cpp
     render_scale_tests.cpp
+    sdl_renderer_tests.cpp
     truetype_freetype_tests.cpp
     cross_tests.cpp
 )
@@ -224,4 +246,16 @@ gtest_discover_tests(
   dosbox_tests WORKING_DIRECTORY "${CMAKE_SOURCE_DIR}"
   DISCOVERY_MODE PRE_TEST
   DISCOVERY_TIMEOUT 60
+  TEST_FILTER "-SdlRendererOffscreenTest.*"
+)
+
+# Mesa's EGL frames carry no frame pointers, so LSan matches the suppression
+# only with the slow unwinder; it is slow, so only this suite gets it.
+add_test(
+  NAME SdlRendererOffscreenTest
+  COMMAND dosbox_tests --gtest_filter=SdlRendererOffscreenTest.*
+  WORKING_DIRECTORY "${CMAKE_SOURCE_DIR}"
+)
+set_tests_properties(SdlRendererOffscreenTest PROPERTIES ENVIRONMENT
+  "ASAN_OPTIONS=fast_unwind_on_malloc=0;LSAN_OPTIONS=suppressions=${CMAKE_SOURCE_DIR}/tests/lsan.supp"
 )

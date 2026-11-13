@@ -13,6 +13,7 @@ import time
 import zipfile
 from pathlib import Path
 
+import pytest
 from conftest import DOSBOX_BIN, WORKSPACE
 from PIL import Image
 
@@ -100,12 +101,12 @@ def pick(client, downs: int) -> None:
 def test_the_menu_lists_the_programs_and_hides_the_extender(dosbox_e2e, tmp_path):
     inst = start_menu(dosbox_e2e, tmp_path, PROBE)
     text = wait_text(inst.client, MENU_TITLE)
-    assert "(PLAY.BAT)" in text, text
-    assert "(KEEN\\RUN.BAT)" in text, text
-    assert "(SETSOUND.BAT)" in text, text
+    assert "[ PLAY.BAT ]" in text, text
+    assert "[ KEEN\\RUN.BAT ]" in text, text
+    assert "[ SETSOUND.BAT ]" in text, text
     assert "DOS4GW" not in text, text
     lines = text.split("\n")
-    order = [next(i for i, line in enumerate(lines) if f"({name})" in line)
+    order = [next(i for i, line in enumerate(lines) if f"[ {name} ]" in line)
              for name in ("PLAY.BAT", "KEEN\\RUN.BAT", "SETSOUND.BAT")]
     assert order == sorted(order), f"games first, then setup:\n{text}"
 
@@ -161,9 +162,163 @@ def test_the_menu_hides_the_cursor_and_gives_it_back(dosbox_e2e, tmp_path):
     assert cursor_start_byte(inst.client) & 0x60 == 0
 
 
-def test_unimenu_typed_by_hand_says_who_starts_it(dosbox_e2e, tmp_path):
+# Z: is the engine's own drive: nothing to offer there, and UniMenu says so.
+def test_unimenu_typed_by_hand_on_z_finds_nothing(dosbox_e2e, tmp_path):
     inst = dosbox_e2e(autoexec_lines=["Y:\\DOS\\UNIMENU.EXE"])
-    wait_text(inst.client, "UniMenu is started by dosbox-automation.")
+    text = wait_text(inst.client, "no programs on this drive")
+    assert MENU_TITLE not in text, text
+
+
+# Started by hand, UniMenu lists the current drive.
+def test_unimenu_typed_by_hand_lists_the_current_drive(dosbox_e2e, tmp_path):
+    zip_path = build_zip(tmp_path / "game" / "probe.zip", PROBE)
+    inst = dosbox_e2e(autoexec_lines=[f"mount c {zip_path}", "c:", "Y:\\DOS\\UNIMENU.EXE"],
+                      conf_dir=tmp_path / "game", settings=settings_for(tmp_path))
+    assert "[ PLAY.BAT ]" in wait_text(inst.client, MENU_TITLE)
+    key(inst.client, "KBD_enter")
+    wait_text(inst.client, "PLAY-ROOT")
+    wait_text(inst.client, "C:\\>")
+    assert segment(inst.client) == ""
+
+
+# A ZOOM-shaped package (built here): the game folder with its conf, which
+# mounts C: and stops at the prompt.
+def zoom_shaped(tmp_path: Path, programs: dict[str, bytes],
+                tail: tuple[str, ...] = ("c:",)) -> Path:
+    lines = "".join(f"{line}\r\n" for line in ("mount c .", *tail))
+    conf = f"[cpu]\r\ncputype = 386\r\n[autoexec]\r\n{lines}".encode()
+    members = {"Game-Long/zoom_game.conf": conf}
+    members.update({f"Game-Long/{name}": data for name, data in programs.items()})
+    return build_zip(tmp_path / "game" / "zoom.zip", members)
+
+
+def start_package(dosbox_e2e, tmp_path: Path, zip_path: Path, **settings: str):
+    return dosbox_e2e(extra_args=[str(zip_path)], allowed_image_roots=[zip_path.parent],
+                      settings={**settings_for(tmp_path), **settings})
+
+
+TWO = {"PLAY.BAT": b"@echo PLAY-ROOT\r\n", "SETSOUND.BAT": b"@echo SETSOUND-RAN\r\n"}
+
+
+def test_a_package_stopping_at_c_shows_the_menu(dosbox_e2e, tmp_path):
+    inst = start_package(dosbox_e2e, tmp_path, zoom_shaped(tmp_path, TWO, ("C:",)))
+    assert "[ PLAY.BAT ]" in wait_text(inst.client, MENU_TITLE)
+    key(inst.client, "KBD_esc")
+    wait_text(inst.client, "C:\\>")
+    assert segment(inst.client) == ""
+
+
+# The archive is C: before the package's own lines run, as a game folder is.
+def test_a_package_whose_autoexec_is_only_c_finds_c_mounted(dosbox_e2e, tmp_path):
+    zip_path = build_zip(tmp_path / "game" / "zoom.zip", {
+        "Game-Long/z_game.conf": b"[cpu]\r\ncputype = 386\r\n[autoexec]\r\nc:\r\n",
+        **{f"Game-Long/{name}": data for name, data in TWO.items()},
+    })
+    inst = start_package(dosbox_e2e, tmp_path, zip_path)
+    assert "[ PLAY.BAT ]" in wait_text(inst.client, MENU_TITLE)
+    key(inst.client, "KBD_esc")
+    wait_text(inst.client, "C:\\>")
+    r = inst.client.type_string("cls\ntype z:\\autoexec.bat\n")
+    assert r.status_code == 200, r.text
+    rows = [row.rstrip() for row in wait_text(inst.client, "UNIMENU.EXE").split("\n")]
+    mount = next(i for i, row in enumerate(rows) if row.startswith("@Z:\\MOUNT.COM C "))
+    assert mount < rows.index("c:"), rows
+
+
+def package_folder(tmp_path: Path) -> Path:
+    folder = tmp_path / "game" / "folder"
+    folder.mkdir(parents=True)
+    (folder / "z_game.conf").write_bytes(b"[cpu]\r\ncputype = 386\r\n[autoexec]\r\nc:\r\n")
+    for name, data in TWO.items():
+        (folder / name).write_bytes(data)
+    return folder
+
+
+# Without Y: there is no UniMenu to start; the start says so instead of
+# queuing a program that is not there.
+@pytest.mark.parametrize("kind", ["archive", "folder"])
+def test_a_package_start_without_unimenu_says_so(dosbox_e2e, tmp_path, kind):
+    path = (zoom_shaped(tmp_path, TWO) if kind == "archive" else package_folder(tmp_path))
+    inst = start_package(dosbox_e2e, tmp_path, path, automount="false")
+    text = wait_text(inst.client, "No program menu: UNIMENU.EXE is not on the Y: drive.")
+    assert "Illegal command" not in text, text
+
+
+def test_a_package_with_an_empty_autoexec_shows_the_menu_for_one_program(dosbox_e2e, tmp_path):
+    zip_path = build_zip(tmp_path / "game" / "zoom.zip", {
+        "Game-Long/z_game.conf": b"[cpu]\r\ncputype = 386\r\n[autoexec]\r\n",
+        "Game-Long/GAME.BAT": b"@echo GAME-RAN\r\n",
+    })
+    inst = start_package(dosbox_e2e, tmp_path, zip_path)
+    text = wait_text(inst.client, "found one program")
+    assert "GAME-RAN" not in text, text
+    wait_text(inst.client, "GAME-RAN", timeout=15)
+
+
+def test_one_program_counts_down_and_escape_drops_to_the_prompt(dosbox_e2e, tmp_path):
+    inst = start_package(dosbox_e2e, tmp_path,
+                         zoom_shaped(tmp_path, {"GAME.BAT": b"@echo GAME-RAN\r\n"}))
+    text = wait_text(inst.client, "Esc to drop to the prompt")
+    assert "GAME.BAT" in text, text
+    key(inst.client, "KBD_esc")
+    wait_text(inst.client, "C:\\>")
+    time.sleep(5)
+    assert "GAME-RAN" not in screen(inst.client)
+
+
+def test_one_program_starts_after_the_countdown(dosbox_e2e, tmp_path):
+    inst = start_package(dosbox_e2e, tmp_path,
+                         zoom_shaped(tmp_path, {"GAME.BAT": b"@echo GAME-RAN\r\n"}))
+    wait_text(inst.client, "found one program")
+    start = time.monotonic()
+    wait_text(inst.client, "GAME-RAN", timeout=15)
+    assert time.monotonic() - start > 2.0
+
+
+def test_unimenu_off_lands_at_the_prompt_and_starts_by_hand(dosbox_e2e, tmp_path):
+    inst = start_package(dosbox_e2e, tmp_path, zoom_shaped(tmp_path, TWO), unimenu="off")
+    wait_text(inst.client, "C:\\>")
+    time.sleep(3)
+    assert MENU_TITLE not in screen(inst.client)
+    assert segment(inst.client) == ""
+    r = inst.client.type_string("y:\\dos\\unimenu.exe\n")
+    assert r.status_code == 200, r.text
+    assert "[ PLAY.BAT ]" in wait_text(inst.client, MENU_TITLE)
+
+
+def test_a_package_that_starts_its_game_shows_no_menu(dosbox_e2e, tmp_path):
+    inst = start_package(dosbox_e2e, tmp_path, zoom_shaped(tmp_path, TWO, ("c:", "PLAY.BAT")))
+    text = wait_text(inst.client, "PLAY-ROOT")
+    assert MENU_TITLE not in text, text
+
+
+def test_f1_shows_the_licence_and_any_key_returns(dosbox_e2e, tmp_path):
+    inst = start_menu(dosbox_e2e, tmp_path, PROBE)
+    assert "F1=Info" in wait_text(inst.client, MENU_TITLE)
+    key(inst.client, "KBD_f1")
+    text = wait_text(inst.client, "ABSOLUTELY NO WARRANTY")
+    for needle in ("UniMenu v0.3", "SJ-ACC-0660-20261029",
+                   "(c) 2026 dosbox automation project",
+                   "GNU General Public License", "dosbox-automation.org",
+                   "Sybase Open Watcom Public License", "github.com/open-watcom"):
+        assert needle in text, f"{needle!r} missing:\n{text}"
+    key(inst.client, "KBD_space")
+    # The redraw passes through frames with neither the licence nor the list.
+    text = wait_text(inst.client, "[ PLAY.BAT ]")
+    assert "WARRANTY" not in text, text
+    assert segment(inst.client) == "UNIMENU"
+    key(inst.client, "KBD_enter")
+    wait_text(inst.client, "PLAY-ROOT")
+
+
+def test_the_licence_screen_fits_40_columns(dosbox_e2e, tmp_path):
+    inst = start_menu(dosbox_e2e, tmp_path, PROBE, before=["@Y:\\DOS\\SETMODE 1"])
+    assert "F1=Info" in wait_text(inst.client, MENU_TITLE)
+    key(inst.client, "KBD_f1")
+    text = wait_text(inst.client, "ABSOLUTELY NO WARRANTY")
+    for needle in ("dosbox-automation.org", "github.com/open-watcom",
+                   "Sybase Open Watcom Public License 1.0"):
+        assert needle in text, f"{needle!r} cut in 40 columns:\n{text}"
 
 
 def test_one_visible_program_runs_without_a_menu(dosbox_e2e, tmp_path):
@@ -183,8 +338,9 @@ CHOOSER = (
 def test_a_chooser_file_replaces_the_scan(dosbox_e2e, tmp_path):
     inst = start_menu(dosbox_e2e, tmp_path, {**PROBE, "CHOOSER.TML": CHOOSER})
     text = wait_text(inst.client, "Curated Keen")
-    assert "Play Keen (KEEN\\RUN.BAT)" in text, text
-    assert "Sound Setup (SETSOUND.BAT)" in text, text
+    lines = text.split("\n")
+    assert any("Play Keen" in line and "[ KEEN\\RUN.BAT ]" in line for line in lines), text
+    assert any("Sound Setup" in line and "[ SETSOUND.BAT ]" in line for line in lines), text
     assert "PLAY.BAT" not in text, f"the file overrides the scan:\n{text}"
     key(inst.client, "KBD_enter")
     wait_text(inst.client, "DATA-FOUND")
@@ -242,11 +398,10 @@ def test_ctrl_c_leaves_the_menu_up(dosbox_e2e, tmp_path):
 def test_the_footer_stays_inside_the_box_in_40_columns(dosbox_e2e, tmp_path):
     inst = start_menu(dosbox_e2e, tmp_path, PROBE, before=["@Y:\\DOS\\SETMODE 1"])
     lines = wait_text(inst.client, MENU_TITLE).split("\n")
-    entry = next(line for line in lines if "(PLAY.BAT)" in line)
-    footer = next(line for line in lines if "ENTER" in line)
-    right = len(entry) - 1
-    assert len(footer) - 1 == right, f"footer past the border:\n{entry}\n{footer}"
-    assert footer[right] == entry[right], f"border overwritten:\n{entry}\n{footer}"
+    entry = next(line for line in lines if "[ PLAY.BAT ]" in line)
+    footer = next(line for line in lines if "Enter=Start" in line)
+    assert footer.rindex("\u2551") == entry.rindex("\u2551"), \
+        f"legend past the border:\n{entry}\n{footer}"
 
 
 def test_the_text_mode_message_is_visible_in_a_graphics_mode(dosbox_e2e, tmp_path):
@@ -257,7 +412,7 @@ def test_the_text_mode_message_is_visible_in_a_graphics_mode(dosbox_e2e, tmp_pat
     img = Image.open(io.BytesIO(r.content)).convert("L")
     # UniMenu's message is the first text row after the mode set cleared the screen.
     band = img.crop((0, 0, img.width, 8))
-    lit = sum(1 for v in band.getdata() if v > 0)
+    lit = sum(1 for v in band.get_flattened_data() if v > 0)
     assert lit > 0, "the message was drawn in colour 0"
 
 
@@ -269,7 +424,7 @@ def test_a_stray_row_count_on_hercules_keeps_the_menu_on_screen(dosbox_e2e, tmp_
     assert inst.client.memory_write(0x484, bytes([48])).status_code == 200
     key(inst.client, "KBD_space")
     lines = wait_text(inst.client, MENU_TITLE).split("\n")
-    assert "PN:" in lines[24], "the version line left the 25-row screen"
+    assert "SJ-ACC-0660-20261029" in lines[24], "the bottom bar left the 25-row screen"
 
 
 def test_a_menu_whose_entries_are_all_hidden_says_so(dosbox_e2e, tmp_path):
@@ -296,8 +451,8 @@ def test_programs_only_in_folders_get_the_menu(dosbox_e2e, tmp_path):
                "KEEN/SETUP.BAT": b"@echo SETUP-RAN\r\n"}
     inst = start_menu(dosbox_e2e, tmp_path, members)
     text = wait_text(inst.client, MENU_TITLE)
-    assert "(KEEN\\RUN.BAT)" in text, text
-    assert "(KEEN\\SETUP.BAT)" in text, text
+    assert "[ KEEN\\RUN.BAT ]" in text, text
+    assert "[ KEEN\\SETUP.BAT ]" in text, text
 
 
 def test_a_dosbox_bat_runs_as_is(dosbox_e2e, tmp_path):
@@ -351,4 +506,4 @@ def test_a_lone_autoexec_bat_does_not_beat_the_folder_menu(dosbox_e2e, tmp_path)
     inst = start_menu(dosbox_e2e, tmp_path, members)
     text = wait_text(inst.client, MENU_TITLE)
     assert "AUTOEXEC-RAN" not in text, text
-    assert "(GAME\\PLAY.BAT)" in text, text
+    assert "[ GAME\\PLAY.BAT ]" in text, text

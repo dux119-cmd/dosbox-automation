@@ -170,6 +170,12 @@ bool lookup_shell_cmd(std::string name, SHELL_Cmd& shell_cmd)
 	return true;
 }
 
+bool SHELL_IsBuiltin(const std::string_view name)
+{
+	SHELL_Cmd shell_cmd = {};
+	return lookup_shell_cmd(std::string(name), shell_cmd);
+}
+
 bool DOS_Shell::ExecuteConfigChange(const char* const property_name,
                                     const std::string _args)
 {
@@ -875,10 +881,9 @@ char* format_time(const uint8_t hour, const uint8_t min, const uint8_t sec,
 	static char return_time_buffer[19] = {0};
 	char ampm[3]                       = "";
 	if (DOS_GetLocaleTimeFormat() == DosTimeFormat::Time12H) {
-		if (fhour != 12) {
-			fhour %= 12;
-		}
-		strcpy(ampm, hour != 12 && hour == fhour ? "am" : "pm");
+		// The 12-hour clock has no hour 0: midnight is 12am.
+		fhour = (hour % 12 == 0) ? 12 : hour % 12;
+		strcpy(ampm, hour < 12 ? "am" : "pm");
 		if (!full) {
 			*(ampm + 1) = 0; // "a" or "p" in short time format
 		}
@@ -1009,10 +1014,17 @@ void DOS_Shell::CMD_DIR(char* args)
 
 	if (!has_option_bare) {
 		if (print_label) {
-			const auto label = To_Label(Drives.at(drive_idx)->GetLabel());
-			output.AddString(MSG_Get("SHELL_CMD_DIR_VOLUME"),
-			                 drive_letter,
-			                 label.c_str());
+			auto label = LabelAsRootEntryName(
+			        Drives.at(drive_idx)->GetLabel());
+			label.erase(label.find_last_not_of(' ') + 1);
+			if (label.empty()) {
+				output.AddString(MSG_Get("SHELL_CMD_DIR_NO_LABEL"),
+				                 drive_letter);
+			} else {
+				output.AddString(MSG_Get("SHELL_CMD_DIR_VOLUME"),
+				                 drive_letter,
+				                 label.c_str());
+			}
 		}
 		// TODO: display volume serial number in DIR and TREE commands
 		output.AddString(MSG_Get("SHELL_CMD_DIR_INTRO"), path);
@@ -2594,7 +2606,11 @@ void DOS_Shell::CMD_VOL(char* args)
 	const auto high = check_cast<uint16_t>((serial >> 16) & 0xFFFF);
 	const auto low  = check_cast<uint16_t>(serial & 0xFFFF);
 	const auto trimmed_label = trim(label);
-	WriteOut(MSG_Get("SHELL_CMD_VOL_OUTPUT"), drive, trimmed_label, high, low);
+	if (*trimmed_label == '\0') {
+		WriteOut(MSG_Get("SHELL_CMD_VOL_OUTPUT_NO_LABEL"), drive, high, low);
+	} else {
+		WriteOut(MSG_Get("SHELL_CMD_VOL_OUTPUT"), drive, trimmed_label, high, low);
+	}
 }
 
 static std::vector<std::string> cmd_move_parse_sources(const char*& args)

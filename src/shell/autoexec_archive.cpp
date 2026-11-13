@@ -6,6 +6,7 @@
 #include "dos/archive/head_sniff.h"
 #include "dos/archive/member_path.h"
 #include "dos/programs/archive_images.h"
+#include "dos/programs/menu_session.h"
 #include "dos/programs/mount_run.h"
 #include "utils/checks.h"
 
@@ -59,8 +60,9 @@ std::optional<Argument> Classify(const std::filesystem::path& path)
 	             : Argument::DiskContainer;
 }
 
-std::optional<std::vector<std::string>> ArchiveLines(const std::string& path,
-                                                     const std::string_view run)
+namespace {
+
+std::optional<std::string> MountOfC(const std::string& path)
 {
 	const auto unquotable = [](const char c) {
 		const auto byte = static_cast<uint8_t>(c);
@@ -69,15 +71,45 @@ std::optional<std::vector<std::string>> ArchiveLines(const std::string& path,
 	if (path.empty() || std::any_of(path.begin(), path.end(), unquotable)) {
 		return {};
 	}
-	auto mount = "@Z:\\MOUNT.COM C \"" + AsBatchText(path) + "\"";
+	return "@Z:\\MOUNT.COM C \"" + AsBatchText(path) + "\"";
+}
+
+} // namespace
+
+std::optional<std::vector<std::string>> ArchiveLines(const std::string& path,
+                                                     const std::string_view run)
+{
+	auto mount = MountOfC(path);
+	if (!mount) {
+		return {};
+	}
 	if (run.empty()) {
-		mount += " -run -exit";
+		*mount += " -run -exit";
 	} else if (MountRun::IsProgramName(run)) {
-		mount += " -run " + AsBatchText(run) + " -exit";
+		*mount += " -run " + AsBatchText(run) + " -exit";
 	}
 	// Reached only when MOUNT queued nothing: the prompt stands at C: as
 	// for a directory argument.
-	return std::vector<std::string>{"@Z:\\MOUNT.COM -u C >NUL", mount, "@C:"};
+	return std::vector<std::string>{"@Z:\\MOUNT.COM -u C >NUL", *mount, "@C:"};
+}
+
+std::optional<std::vector<std::string>> MountLines(const std::string& path)
+{
+	const auto mount = MountOfC(path);
+	if (!mount) {
+		return {};
+	}
+	return std::vector<std::string>{"@Z:\\MOUNT.COM -u C >NUL", *mount, "@C:"};
+}
+
+std::string MenuLine()
+{
+	return "@" + std::string(MenuSession::MenuProgram);
+}
+
+std::string RunOnMountedLine(const std::string_view run)
+{
+	return "@Z:\\MOUNT.COM C -run " + AsBatchText(run) + " -exit";
 }
 
 } // namespace AutoexecArchive

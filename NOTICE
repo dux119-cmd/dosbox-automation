@@ -1,0 +1,51 @@
+dosbox-automation Licensing Notice
+----------------------------------
+
+dosbox-automation began as a fork of dosbox-staging and is derived
+from it (and through it from DOSBox). It has been developed
+independently since version 0.85.0. All works derived from the DOSBox
+project carry the same license terms as granted by the DOSBox authors:
+the GNU General Public License version 2 or later (GPL-2.0-or-later).
+
+Original works authored by the dosbox-automation project are also
+licensed under GPL-2.0-or-later to maintain compatibility with the
+upstream codebase and other DOSBox forks.
+
+Exceptions: VIEW (view.com) and UniMenu (unimenu.exe), our own DOS
+programs on the bundled Y: drive, are separate programs licensed under
+GPL-3.0-or-later, with an additional permission under its section 7
+for the Open Watcom C runtime they link. Their packages with licence
+notes and sources are in vendor/dos-programs/.
+
+The full text of the GPL-2.0 is in LICENSE.
+
+
+Third-party components
+----------------------
+
+This project includes third-party libraries, emulator cores, and
+bundled programs under various open-source licenses. All are compatible
+with the GPL-2.0-or-later as confirmed by the GNU license compatibility
+guidelines.
+
+See THIRD_PARTY_LICENSES.txt for the complete inventory and the full
+text of each license.
+
+The license of each individual source file is stated in its first few
+lines, either as a house-format header or an SPDX-License-Identifier.
+
+
+License compatibility
+---------------------
+
+As depicted in GNU's license compatibility flow chart [1] and their
+FAQ [2], the following license upgrades are permitted:
+
+  LGPL-2.1-or-later -> GPL-2.0-or-later -> GPL-3.0-or-later
+  LGPL-3.0-or-later -> GPL-3.0-or-later
+
+Taken as a whole, the compiled binaries of dosbox-automation are
+covered by the terms of GPL-2.0-or-later.
+
+[1] https://www.gnu.org/licenses/quick-guide-gplv3.en.html
+[2] https://www.gnu.org/licenses/gpl-faq.html#AllCompatibility

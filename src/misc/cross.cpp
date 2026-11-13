@@ -233,6 +233,7 @@ std_fs::path get_data_dir()
 }
 
 static std_fs::path cached_config_dir = {};
+static bool portable_layout          = false;
 
 void init_config_dir()
 {
@@ -249,6 +250,7 @@ void init_config_dir()
 			        conf_dir.string().c_str());
 
 			cached_config_dir = conf_dir;
+			portable_layout   = true;
 		} else {
 			cached_config_dir = get_or_create_config_dir();
 		}
@@ -259,6 +261,11 @@ std_fs::path get_config_dir()
 {
 	assert(!cached_config_dir.empty());
 	return cached_config_dir;
+}
+
+bool is_portable_layout()
+{
+	return portable_layout;
 }
 
 std_fs::path resolve_home(const std::string &str) noexcept

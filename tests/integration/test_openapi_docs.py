@@ -11,6 +11,8 @@ token file is never reachable through the doc carve-out.
 """
 
 import json
+import re
+from pathlib import Path
 
 import requests
 
@@ -57,3 +59,20 @@ def test_token_file_not_exposed_via_docs(dosbox):
     # Not on the allowlist, so the bearer check applies and rejects it.
     resp = _get(dosbox, "/api_token")
     assert resp.status_code == 401
+
+
+def _registered_routes():
+    """(verb, path) for every /api/v1 route webserver.cpp registers."""
+    webserver = Path(__file__).resolve().parents[2] / "src" / "webserver" / "webserver.cpp"
+    source = webserver.read_text(encoding="utf-8")
+    found = re.findall(r'server\.(Get|Post|Put|Delete)\(\s*"(/api/v1/[^"]+)"', source)
+    return {(verb.lower(), re.sub(r":([A-Za-z_]+)", r"{\1}", path)) for verb, path in found}
+
+
+def test_every_registered_route_is_in_the_spec(dosbox):
+    spec = json.loads(_get(dosbox, "/openapi.json").text)
+    routes = _registered_routes()
+    assert len(routes) > 40, routes
+    missing = sorted(f"{verb.upper()} {path}" for verb, path in routes
+                     if verb not in spec["paths"].get(path, {}))
+    assert not missing, "routes the engine serves but the spec lacks:\n" + "\n".join(missing)

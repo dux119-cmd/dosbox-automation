@@ -10,6 +10,8 @@
 
 #include <gtest/gtest.h>
 
+#include <algorithm>
+
 #include "dos/dos.h"
 #include "dos/drives.h"
 #include "dosbox_test_fixture.h"
@@ -479,6 +481,21 @@ TEST_F(ArchiveChooserScanTest, SubdirectoryExesAreFound)
 		}
 	}
 	EXPECT_TRUE(found_subdir);
+}
+
+// GOG and folder rips put the game one folder deeper (GAME\BIN\GAME.EXE);
+// the scan looks two levels down and no further.
+TEST_F(ArchiveChooserScanTest, TheScanReachesTwoFolderLevels)
+{
+	File("A/B/GAME.EXE");
+	File("A/B/C/DEEP.EXE");
+	File("A/TOP.EXE");
+	std::vector<std::string> found = {};
+	for (const auto& e : ScanPrograms('C').entries) {
+		found.push_back(e.exe);
+	}
+	std::sort(found.begin(), found.end());
+	EXPECT_EQ(found, (std::vector<std::string>{"A\\B\\GAME.EXE", "A\\TOP.EXE"}));
 }
 
 TEST_F(ArchiveChooserScanTest, NoExesReturnsNullopt)

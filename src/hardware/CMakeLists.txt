@@ -67,6 +67,7 @@ target_sources(dosboxcommon PRIVATE
 
   cmos.cpp
   dma.cpp
+  guest_memory.cpp
   ide.cpp
   memory.cpp
   pci_bus.cpp

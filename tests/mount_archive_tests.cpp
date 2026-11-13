@@ -23,13 +23,16 @@
 #include "dos/programs/mount_common.h"
 #include "dos/programs/mount_policy.h"
 #include "dos/programs/mount_policy_system_paths.h"
+#include "dos/programs/package_runtime.h"
 #include "dosbox_test_fixture.h"
 #include "hardware/dma.h"
 #include "ints/bios_disk.h"
 #include "misc/cross.h"
+#include "misc/unicode.h"
 #include "shell/shell.h"
+#include "test_home.h"
 #include "test_temp_dir.h"
-#include "utils/env_utils.h"
+#include "utils/string_utils.h"
 
 #include <gtest/gtest.h>
 
@@ -39,7 +42,6 @@
 #include <filesystem>
 #include <fstream>
 #include <iterator>
-#include <ranges>
 #include <string>
 #include <vector>
 
@@ -58,15 +60,6 @@ using ArchiveFixtures::WriteIsz;
 namespace {
 
 namespace std_fs = std::filesystem;
-
-void SetEnv(const char* name, const char* value)
-{
-#if defined(WIN32)
-	_putenv_s(name, value);
-#else
-	setenv(name, value, 1);
-#endif
-}
 
 std::vector<FileEntry> Game()
 {
@@ -646,9 +639,10 @@ TEST_F(MountArchiveTest, AHouseArchiveWhoseMemberCannotBeEnteredIsRefused)
 	                                 {"info.toml",     "[game]\n"},
 	                                 { "seven.7z", ReadAll(seven)}
         });
+	Set("archive_sequential", "refuse");
 	EXPECT_FALSE(Mount("D " + house.string()).has_value());
 	EXPECT_FALSE(Drives.at(drive_index('D')));
-	Set("archive_sequential", "cache");
+	Set("archive_sequential", "unpack");
 	ASSERT_TRUE(Mount("D " + house.string()).has_value());
 	ASSERT_TRUE(DriveAt('D'));
 	EXPECT_TRUE(DriveAt('D')->FileExists("DOOM.EXE"));
@@ -935,14 +929,17 @@ TEST_F(MountArchiveTest, JunkWithAnArchiveExtensionIsRefused)
 	EXPECT_FALSE(Mount("D " + tmp.string() + " -t archive").has_value());
 }
 
-TEST_F(MountArchiveTest, SequentialIsRefusedByDefaultAndCachedOnRequest)
+// Nothing else can read a sequential archive, so it is unpacked into the cache
+// by default; archive_sequential = refuse keeps it out.
+TEST_F(MountArchiveTest, SequentialIsUnpackedByDefaultAndRefusedOnRequest)
 {
 	const auto tgz = Built("doom.tar.gz", Kind::TarGz);
+	Set("archive_sequential", "refuse");
 	EXPECT_FALSE(Mount("D " + tgz.string()).has_value());
 	ASSERT_FALSE(verdicts.empty());
 	EXPECT_EQ(verdicts.back().second.reason, DenyReason::ArchiveSequential);
 	EXPECT_EQ(ArchiveMount::ArchiveHelperClient::LiveHelpers(), 0);
-	Set("archive_sequential", "cache");
+	Set("archive_sequential", "unpack");
 	const auto result = Mount("D " + tgz.string());
 	ASSERT_TRUE(result.has_value());
 	auto drive = DriveAt('D');
@@ -1012,8 +1009,7 @@ TEST_F(MountArchiveTest, CacheStatusTextFitsEightyColumns)
 	o.entries.push_back(e);
 	const auto text = MOUNT::CacheOverviewText(o);
 	auto path_lines = 0;
-	for (const auto part : std::views::split(std::string_view(text), '\n')) {
-		const auto line = std::string(part.begin(), part.end());
+	for (const auto& line : split_with_empties(text, '\n')) {
 		if (line == "  " + cache_dir || line == "    " + archive) {
 			++path_lines;
 			continue;
@@ -1501,11 +1497,10 @@ TEST_F(MountArchiveTest, ATildeInTheSidecarPathIsTheHomeDirectory)
 	const auto zip  = Built("doom.zip", Kind::ZipStored);
 	const auto mine = tmp / "mine";
 	std_fs::create_directories(mine);
-	const auto old_home = get_env_var("HOME");
-	SetEnv("HOME", tmp.string().c_str());
-	const auto result = Mount("D " + zip.string() + " -sidecar ~" +
-	                          CROSS_FILESPLIT + "mine");
-	SetEnv("HOME", old_home.c_str());
+	const auto result = [&] {
+		TestHome::ScopedEnv home("HOME", tmp.string());
+		return Mount("D " + zip.string() + " -sidecar ~" + CROSS_FILESPLIT + "mine");
+	}();
 	ASSERT_TRUE(result.has_value());
 	EXPECT_EQ(UnionAt('D')->SidecarDirectory(), std_fs::canonical(mine));
 }
@@ -2420,63 +2415,205 @@ TEST_F(MountArchiveTest, AnUnsupportedMethodSaysSoAndAsksForTheArchive)
 	EXPECT_NE(text.find("link"), std::string::npos) << text;
 }
 
-// ada-pbr6: a path pushed the reason past 80 columns, where DOS wraps it
-// mid-word. The name stands alone; every other line fits with the longest
-// text the engine puts into it.
-TEST(MountRefusalTexts, TheNameStandsAloneAndTheRestFits)
+TEST(MountHelpText, EveryLineFitsAndTheDescriptionsShareOneColumn)
 {
-	constexpr size_t MaxColumns = 79;
-	const auto longest_reason = [](const std::string_view message_id) {
+	constexpr size_t MaxColumns        = 80;
+	constexpr size_t DescriptionColumn = 18;
+	auto text                          = std::string(MOUNT::HelpLongText);
+	for (const std::string_view tag : {"[color=", "[reset"}) {
+		for (auto open = text.find(tag); open != std::string::npos;
+		     open      = text.find(tag, open)) {
+			const auto close = text.find(']', open);
+			ASSERT_NE(close, std::string::npos) << text.substr(open);
+			text.erase(open, close - open + 1);
+		}
+	}
+	// PRIMARY_MOD_NAME, as MOUNT prints the help.
+	for (auto at = text.find("%s"); at != std::string::npos;
+	     at      = text.find("%s")) {
+		text.replace(at, 2, "Ctrl");
+	}
+	for (const auto& line : split_with_empties(text, '\n')) {
+		EXPECT_LE(line.size(), MaxColumns) << line;
+		if (!line.starts_with("  -")) {
+			continue;
+		}
+		const auto gap = line.find("  ", 2);
+		if (gap != std::string::npos && gap < DescriptionColumn) {
+			EXPECT_EQ(line.find_first_not_of(' ', gap), DescriptionColumn)
+			        << line;
+		}
+	}
+}
+
+// The longest text the engine puts into a refusal's %s.
+static std::string RefusalSample(const std::string_view message_id)
+{
+	const auto longest_reason = [](const std::string_view id) {
 		std::string longest = {};
 		for (int i = 0; i < 128; ++i) {
 			const auto reason = static_cast<DenyReason>(i);
-			if (message_id == MountPolicy::DenyMessageId(reason)) {
+			if (id == MountPolicy::DenyMessageId(reason)) {
 				const std::string text = MountPolicy::DenyReasonText(reason);
 				longest = text.size() > longest.size() ? text : longest;
 			}
 		}
 		return longest;
 	};
-	std::string longest_kind = {};
-	for (int i = 0; i < 64; ++i) {
-		const std::string name = ArchiveMount::HeadKindName(
-		        static_cast<ArchiveMount::HeadKind>(i));
-		longest_kind = name.size() > longest_kind.size() ? name : longest_kind;
+	if (message_id == "PROGRAM_MOUNT_POLICY_REFUSED" ||
+	    message_id == "PROGRAM_MOUNT_POLICY_REFUSED_FILE" ||
+	    message_id == "PROGRAM_MOUNT_POLICY_SYSTEM" ||
+	    message_id == "PROGRAM_MOUNT_ARCHIVE_REFUSED") {
+		return longest_reason(message_id);
 	}
-	const std::vector<std::pair<std::string_view, std::string>> samples = {
-	        {    "PROGRAM_MOUNT_POLICY_REFUSED", longest_reason("PROGRAM_MOUNT_POLICY_REFUSED")},
-	        {   "PROGRAM_MOUNT_ARCHIVE_REFUSED", longest_reason("PROGRAM_MOUNT_ARCHIVE_REFUSED")},
-	        {"PROGRAM_MOUNT_ARCHIVE_SEQUENTIAL", longest_kind},
-	        {"PROGRAM_MOUNT_ARCHIVE_UNSUPPORTED", "PKWARE DCL implode, method 10"},
-	        {      "PROGRAM_MOUNT_ARCHIVE_ROOT", "\\GAMES\\COMMANDR\\KEEN4"},
-	};
+	if (message_id == "PROGRAM_MOUNT_ARCHIVE_SEQUENTIAL") {
+		std::string longest_kind = {};
+		for (int i = 0; i < 64; ++i) {
+			const std::string name = ArchiveMount::HeadKindName(
+			        static_cast<ArchiveMount::HeadKind>(i));
+			longest_kind = name.size() > longest_kind.size() ? name : longest_kind;
+		}
+		return longest_kind;
+	}
+	if (message_id == "PROGRAM_MOUNT_ARCHIVE_UNSUPPORTED") {
+		return "PKWARE DCL implode, method 10";
+	}
+	if (message_id == "PROGRAM_MOUNT_ARCHIVE_ROOT") {
+		return "\\GAMES\\COMMANDR\\KEEN4";
+	}
+	return "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx";
+}
+
+// Every line after the name that runs past 79 columns with the sample in; a
+// translation counts characters, not UTF-8 bytes.
+static std::vector<std::string> OverWideRefusalLines(const std::string_view message_id,
+                                                     const std::string& text)
+{
+	constexpr size_t MaxColumns = 79;
+	const auto sample = RefusalSample(message_id);
+	const auto lines  = split_with_empties(text, '\n');
+	std::vector<std::string> over_wide = {};
+	for (size_t n = 1; n < lines.size(); ++n) {
+		auto line = lines[n];
+		if (line.find_first_not_of(' ') == line.find("%s") && line.ends_with("%s")) {
+			continue;
+		}
+		for (auto at = line.find("%s"); at != std::string::npos;
+		     at = line.find("%s", at + sample.size())) {
+			line.replace(at, 2, sample);
+		}
+		const auto columns = std::count_if(line.begin(), line.end(), [](const char c) {
+			return (static_cast<unsigned char>(c) & 0xc0) != 0x80;
+		});
+		if (static_cast<size_t>(columns) > MaxColumns) {
+			over_wide.push_back(line);
+		}
+	}
+	return over_wide;
+}
+
+// A catalogue's msgstr for one msgctxt, unescaped; empty when untranslated.
+static std::string PoTranslation(const std::string& content, const std::string& message_id)
+{
+	const auto ctxt = content.find("msgctxt \"" + message_id + "\"\n");
+	if (ctxt == std::string::npos) {
+		return {};
+	}
+	auto at = content.find("\nmsgstr ", ctxt);
+	if (at == std::string::npos) {
+		return {};
+	}
+	at += 8;
+	std::string text = {};
+	while (at < content.size() && content[at] == '"') {
+		const auto close = content.find("\"\n", at + 1);
+		if (close == std::string::npos) {
+			break;
+		}
+		const auto piece = content.substr(at + 1, close - at - 1);
+		for (size_t i = 0; i < piece.size(); ++i) {
+			if (piece[i] == '\\' && i + 1 < piece.size()) {
+				++i;
+				text += piece[i] == 'n' ? '\n' : piece[i];
+			} else {
+				text += piece[i];
+			}
+		}
+		at = close + 2;
+	}
+	return text;
+}
+
+// ada-pbr6: a path pushed the reason past 80 columns, where DOS wraps it
+// mid-word. The name stands alone; every other line fits with the longest
+// text the engine puts into it.
+TEST(MountRefusalTexts, TheNameStandsAloneAndTheRestFits)
+{
 	ASSERT_FALSE(MOUNT::RefusalTexts().empty());
 	for (const auto& [id, text] : MOUNT::RefusalTexts()) {
-		std::string sample = "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx";
-		for (const auto& [sample_id, value] : samples) {
-			if (sample_id == id) {
-				sample = value;
-			}
-		}
-		auto lines = std::vector<std::string>{};
-		for (const auto part : std::views::split(std::string_view(text), '\n')) {
-			lines.emplace_back(part.begin(), part.end());
-		}
+		const auto lines = split_with_empties(text, '\n');
 		ASSERT_FALSE(lines.empty()) << id;
 		EXPECT_EQ(lines.front(), "%s") << id;
-		for (size_t n = 1; n < lines.size(); ++n) {
-			auto line = lines[n];
-			if (line.find_first_not_of(' ') == line.find("%s") &&
-			    line.ends_with("%s")) {
-				continue;
-			}
-			for (auto at = line.find("%s"); at != std::string::npos;
-			     at = line.find("%s", at + sample.size())) {
-				line.replace(at, 2, sample);
-			}
-			EXPECT_LE(line.size(), MaxColumns) << id << ": " << line;
+		for (const auto& line : OverWideRefusalLines(id, text)) {
+			ADD_FAILURE() << id << ": " << line;
 		}
 	}
+}
+
+// DOS wraps a translated line as it wraps an English one.
+TEST(MountRefusalTexts, TheTranslationsFitAsWell)
+{
+	const auto dir = std::filesystem::path("resources") / "translations";
+	ASSERT_TRUE(std::filesystem::is_directory(dir)) << dir;
+	int catalogues = 0;
+	for (const auto& entry : std::filesystem::directory_iterator(dir)) {
+		if (entry.path().extension() != ".po") {
+			continue;
+		}
+		++catalogues;
+		std::ifstream in(entry.path(), std::ios::binary);
+		std::string content((std::istreambuf_iterator<char>(in)),
+		                    std::istreambuf_iterator<char>());
+		std::erase(content, '\r');
+		int translated_count = 0;
+		for (const auto& [id, text] : MOUNT::RefusalTexts()) {
+			const auto translated = PoTranslation(content, id);
+			translated_count += translated.empty() ? 0 : 1;
+			for (const auto& line : OverWideRefusalLines(id, translated)) {
+				ADD_FAILURE() << entry.path().filename().string() << " " << id
+				              << ": " << line;
+			}
+		}
+		EXPECT_GT(translated_count, 0) << entry.path().filename().string();
+	}
+	EXPECT_GT(catalogues, 0);
+}
+
+// A refused folder points at mount_allowed_bases, a refused file at
+// mount_allowed_image_roots; a system path no setting can open names neither.
+TEST(MountRefusalTexts, EachPolicyHintNamesTheSettingThatApplies)
+{
+	const auto text_of = [](const std::string_view id) {
+		for (const auto& [text_id, text] : MOUNT::RefusalTexts()) {
+			if (text_id == id) {
+				return text;
+			}
+		}
+		return std::string();
+	};
+	const auto folder = text_of("PROGRAM_MOUNT_POLICY_REFUSED");
+	const auto file   = text_of("PROGRAM_MOUNT_POLICY_REFUSED_FILE");
+	const auto system = text_of("PROGRAM_MOUNT_POLICY_SYSTEM");
+	ASSERT_FALSE(folder.empty());
+	ASSERT_FALSE(file.empty());
+	ASSERT_FALSE(system.empty());
+
+	EXPECT_NE(folder.find("mount_allowed_bases"), std::string::npos) << folder;
+	EXPECT_EQ(folder.find("mount_allowed_image_roots"), std::string::npos) << folder;
+	EXPECT_NE(file.find("mount_allowed_image_roots"), std::string::npos) << file;
+	EXPECT_EQ(file.find("mount_allowed_bases"), std::string::npos) << file;
+	EXPECT_EQ(system.find("mount_allowed"), std::string::npos) << system;
+	EXPECT_EQ(system.find("-conf"), std::string::npos) << system;
 }
 
 TEST_F(MountArchiveTest, RunQueuesTheNamedProgram)
@@ -2485,6 +2622,317 @@ TEST_F(MountArchiveTest, RunQueuesTheNamedProgram)
 	ASSERT_TRUE(Mount("D " + zip.string() + " -run GAME.EXE").has_value());
 	EXPECT_EQ(SHELL_TakePendingCommands(),
 	          (std::vector<std::string>{"D:", "D:\\GAME.EXE"}));
+}
+
+// A package's own MOUNT lines set up the drives; the command line's --run
+// then starts its program on C:.
+TEST_F(MountArchiveTest, RunOnADriveAlreadyMountedStartsThere)
+{
+	const auto zip = Built("two.zip", Kind::ZipStored, TwoPrograms());
+	ASSERT_TRUE(Mount("D " + zip.string()).has_value());
+	SHELL_TakePendingCommands();
+	ASSERT_TRUE(Mount("D -run GAME.EXE -exit").has_value());
+	EXPECT_EQ(SHELL_TakePendingCommands(),
+	          (std::vector<std::string>{"D:", "D:\\GAME.EXE", "EXIT"}));
+}
+
+// A package conf read at a MOUNT after start (ada-nb2a): settings as from a
+// -conf, and which of its [autoexec] lines run depends on -run.
+class MountPackageTest : public MountArchiveTest {
+protected:
+	std::filesystem::path PackageZip(const std::string& conf)
+	{
+		return Built("pkg.zip",
+		             Kind::ZipStored,
+		             {{"dosbox.conf", conf}, {"GAME.EXE", "MZ"}});
+	}
+	static std::string MountLine(const char letter,
+	                             const std::filesystem::path& zip)
+	{
+		return std::string("mount ") + letter + " \"" +
+		       ArchiveMount::PathToUtf8(std::filesystem::canonical(zip)) +
+		       "\"";
+	}
+	static std::string CpuType()
+	{
+		return get_section("cpu")->GetString("cputype");
+	}
+};
+
+constexpr auto PackageConf = "[cpu]\ncputype=386\n[autoexec]\nmount c .\nc:\nGAME.EXE\n";
+
+// The package's drives win: a package that mounts a drive takes the place of
+// the MOUNT that found it, whatever letter that MOUNT named.
+TEST_F(MountPackageTest, APlainMountQueuesOnlyThePackagesMountLines)
+{
+	const auto zip = PackageZip(PackageConf);
+	ASSERT_TRUE(Mount("D " + zip.string()).has_value());
+	EXPECT_EQ(SHELL_TakePendingCommands(),
+	          (std::vector<std::string>{MountLine('c', zip)}));
+	EXPECT_EQ(CpuType(), "386");
+	EXPECT_FALSE(Drives.at(drive_index('D')))
+	        << "the package mounts its own drives";
+}
+
+TEST_F(MountPackageTest, RunQueuesTheWholeAutoexec)
+{
+	const auto zip = PackageZip(PackageConf);
+	ASSERT_TRUE(Mount("D " + zip.string() + " -run -exit").has_value());
+	EXPECT_EQ(SHELL_TakePendingCommands(),
+	          (std::vector<std::string>{MountLine('c', zip), "c:", "GAME.EXE", "EXIT"}));
+	EXPECT_FALSE(Drives.at(drive_index('D')));
+}
+
+TEST_F(MountPackageTest, RunWithANameRunsItOnThePackagesC)
+{
+	const auto zip = PackageZip(PackageConf);
+	ASSERT_TRUE(Mount("D " + zip.string() + " -run GAME.EXE -exit").has_value());
+	EXPECT_EQ(SHELL_TakePendingCommands(),
+	          (std::vector<std::string>{MountLine('c', zip),
+	                                    "MOUNT C -run GAME.EXE -exit"}));
+	EXPECT_FALSE(Drives.at(drive_index('D')));
+}
+
+// As --run at the command line: without a C: of its own, the archive is
+// mounted again on the MOUNT's letter for the program.
+TEST_F(MountPackageTest, RunWithANameWithoutAPackageCMountsTheArchiveForIt)
+{
+	const auto zip = PackageZip("[autoexec]\nmount e .\n");
+	ASSERT_TRUE(Mount("D " + zip.string() + " -run GAME.EXE").has_value());
+	EXPECT_EQ(SHELL_TakePendingCommands(),
+	          (std::vector<std::string>{MountLine('e', zip),
+	                                    "MOUNT D \"" +
+	                                            ArchiveMount::PathToUtf8(
+	                                                    std::filesystem::canonical(zip)) +
+	                                            "\" -run GAME.EXE"}));
+	EXPECT_FALSE(Drives.at(drive_index('D')));
+}
+
+// The remount carries the archive switches the user typed.
+TEST_F(MountPackageTest, TheArchiveMountedAgainKeepsTheTypedSwitches)
+{
+	const auto zip = PackageZip("[autoexec]\nmount e .\n");
+	ASSERT_TRUE(Mount("D " + zip.string() +
+	                  " -run GAME.EXE -ro -label MYLBL -nosidecar")
+	                    .has_value());
+	EXPECT_EQ(SHELL_TakePendingCommands(),
+	          (std::vector<std::string>{MountLine('e', zip),
+	                                    "MOUNT D \"" +
+	                                            ArchiveMount::PathToUtf8(
+	                                                    std::filesystem::canonical(zip)) +
+	                                            "\" -ro -label \"MYLBL\" -nosidecar"
+	                                            " -run GAME.EXE"}));
+}
+
+TEST_F(MountPackageTest, TheArchiveMountedAgainKeepsRootAndScratch)
+{
+	const auto zip = Built("pkg.zip",
+	                       Kind::ZipStored,
+	                       {{"dosbox.conf", "[autoexec]\nmount e .\n"},
+	                        {"GAME.EXE", "MZ"},
+	                        {"SUB/X.TXT", "x"}});
+	ASSERT_TRUE(Mount("D " + zip.string() + " -run GAME.EXE -scratch -root SUB")
+	                    .has_value());
+	const auto queued = SHELL_TakePendingCommands();
+	ASSERT_EQ(queued.size(), 2u);
+	EXPECT_NE(queued[1].find("\" -root \"SUB\" -scratch -run GAME.EXE"),
+	          std::string::npos)
+	        << queued[1];
+}
+
+// A relative -sidecar goes on as the folder it named, wherever the remount runs.
+TEST_F(MountPackageTest, TheArchiveMountedAgainKeepsTheSidecarFolder)
+{
+	const auto zip     = PackageZip("[autoexec]\nmount e .\n");
+	const auto sidecar = tmp / "mysaves";
+	std::filesystem::create_directories(sidecar);
+	ASSERT_TRUE(Mount("D " + zip.string() + " -run GAME.EXE -sidecar " +
+	                  sidecar.string())
+	                    .has_value());
+	const auto queued = SHELL_TakePendingCommands();
+	ASSERT_EQ(queued.size(), 2u);
+	EXPECT_NE(queued[1].find(" -sidecar \"" + sidecar.string() + "\""),
+	          std::string::npos)
+	        << queued[1];
+}
+
+// A value that cannot travel inside quotes stops the start before the
+// package's settings apply.
+TEST_F(MountPackageTest, ASwitchValueThatCannotBeCarriedStartsNothing)
+{
+	const auto zip = PackageZip("[cpu]\ncputype=386\n[autoexec]\nmount e .\n");
+	ASSERT_TRUE(get_section("cpu")->HandleInputLine("cputype=486"));
+	ASSERT_TRUE(Mount("D " + zip.string() + " -run GAME.EXE -label A\x01" "B")
+	                    .has_value());
+	EXPECT_TRUE(SHELL_TakePendingCommands().empty());
+	EXPECT_EQ(CpuType(), "486");
+}
+
+// The batch reader runs DOS bytes, as AUTOEXEC.BAT does: host paths and the
+// package's text go through the code page first.
+TEST_F(MountPackageTest, APackageInAFolderWithAnUmlautQueuesItInTheCodePage)
+{
+	std::filesystem::create_directories(tmp / "R\xc3\xa4tsel");
+	const auto zip = Built("R\xc3\xa4tsel/pkg.zip",
+	                       Kind::ZipStored,
+	                       {{"dosbox.conf", "[autoexec]\nmount c .\nECHO Gr\xc3\xbc\xc3\x9f\n"},
+	                        {"GAME.EXE", "MZ"}});
+	const auto to_dos = [](const std::string& text) {
+		return utf8_to_dos(text,
+		                   DosStringConvertMode::WithControlCodes,
+		                   UnicodeFallback::Box,
+		                   get_utf8_code_page());
+	};
+	ASSERT_TRUE(Mount("D " + to_dos(zip.string()) + " -run").has_value());
+	const auto queued = SHELL_TakePendingCommands();
+	ASSERT_EQ(queued.size(), 2u);
+	const auto utf8_path = ArchiveMount::PathToUtf8(std::filesystem::canonical(zip));
+	EXPECT_EQ(queued[0], to_dos("mount c \"" + utf8_path + "\""));
+	EXPECT_NE(queued[0].find('\x84'), std::string::npos) << queued[0];
+	EXPECT_EQ(queued[1], "ECHO Gr\x81\xe1");
+}
+
+// A remount on a letter the package mounted itself would fail.
+TEST_F(MountPackageTest, RunWithANameOnALetterThePackageMountsRunsItThere)
+{
+	const auto zip = PackageZip("[autoexec]\nmount d .\n");
+	ASSERT_TRUE(Mount("D " + zip.string() + " -run GAME.EXE").has_value());
+	EXPECT_EQ(SHELL_TakePendingCommands(),
+	          (std::vector<std::string>{MountLine('d', zip), "MOUNT D -run GAME.EXE"}));
+}
+
+// A name that does not resolve runs nothing, EXIT included.
+TEST_F(MountPackageTest, ANameThatDoesNotResolveQueuesNoExit)
+{
+	const auto zip = PackageZip("[autoexec]\nmount\n");
+	ASSERT_TRUE(Mount("D " + zip.string() + " -run NOPE.EXE -exit").has_value());
+	EXPECT_EQ(SHELL_TakePendingCommands(), (std::vector<std::string>{"D:", "mount"}));
+}
+
+// The settings apply only when the package's lines can run.
+TEST_F(MountPackageTest, AWaitingBatchLeavesThePackagesSettingsAlone)
+{
+	ASSERT_TRUE(SHELL_QueuePendingCommands({"ECHO first"}));
+	const auto zip = PackageZip(PackageConf);
+	ASSERT_TRUE(Mount("D " + zip.string() + " -run").has_value());
+	EXPECT_EQ(CpuType(), "auto");
+	SHELL_TakePendingCommands();
+}
+
+// As at start: the package's lines run on the drive, then the plain -run.
+TEST_F(MountPackageTest, APackageWithoutMountLinesKeepsTheDrive)
+{
+	const auto zip = PackageZip("[autoexec]\nGAME.EXE\n");
+	ASSERT_TRUE(Mount("D " + zip.string() + " -run -exit").has_value());
+	EXPECT_EQ(SHELL_TakePendingCommands(),
+	          (std::vector<std::string>{"D:", "GAME.EXE", "MOUNT D -run -exit"}));
+	EXPECT_TRUE(Drives.at(drive_index('D')));
+}
+
+TEST_F(MountPackageTest, APackageWithoutAutoexecLinesRunsAsBefore)
+{
+	const auto zip = PackageZip("[cpu]\ncputype=386\n");
+	ASSERT_TRUE(Mount("D " + zip.string() + " -run").has_value());
+	EXPECT_EQ(SHELL_TakePendingCommands(),
+	          (std::vector<std::string>{"D:", "D:\\GAME.EXE"}));
+	EXPECT_EQ(CpuType(), "386");
+}
+
+TEST_F(MountPackageTest, PackageConfOffReadsNothing)
+{
+	const auto before = CpuType();
+	Set("package_conf", "off");
+	const auto zip = PackageZip(PackageConf);
+	ASSERT_TRUE(Mount("D " + zip.string() + " -run").has_value());
+	EXPECT_EQ(SHELL_TakePendingCommands(),
+	          (std::vector<std::string>{"D:", "D:\\GAME.EXE"}));
+	EXPECT_EQ(CpuType(), before);
+}
+
+// Its own MOUNT lines mount the same archive; they must not read it again.
+TEST_F(MountPackageTest, ThePackageIsActiveWhileItsLinesWait)
+{
+	const auto zip = PackageZip(PackageConf);
+	ASSERT_TRUE(Mount("D " + zip.string() + " -run").has_value());
+	EXPECT_TRUE(PackageRuntime::IsActive(zip));
+	ASSERT_TRUE(get_section("cpu")->HandleInputLine("cputype=486"));
+	// Read-only: a second writable mount of the archive is refused (one
+	// sidecar).
+	ASSERT_TRUE(Mount("F " + zip.string() + " -ro").has_value());
+	EXPECT_EQ(CpuType(), "486");
+	SHELL_TakePendingCommands();
+	EXPECT_FALSE(PackageRuntime::IsActive(zip));
+}
+
+// A DOS path on an archive drive names its member as a chain, so
+// IMGMOUNT and MOUNT typed in DOS reach an image inside the archive.
+TEST_F(MountArchiveTest, ADosPathOnAnArchiveDriveMapsToItsChainPath)
+{
+	const auto zip = Built("cd.zip",
+	                       Kind::ZipStored,
+	                       {{"GAME.EXE", "MZ"}, {"cd/game.iso", ArchiveFixtures::MinimalIso()}});
+	ASSERT_TRUE(Mount("E " + zip.string()).has_value());
+	EXPECT_EQ(MOUNT::HostPathOfDosPath("E:\\CD\\GAME.ISO"),
+	          ArchiveMount::PathToUtf8(ArchiveMount::PathWithChain(
+	                  std::filesystem::canonical(zip), "cd/game.iso")));
+	EXPECT_EQ(MOUNT::HostPathOfDosPath("E:\\CD\\NONE.ISO"), "");
+	EXPECT_EQ(MOUNT::HostPathOfDosPath("E:\\CD"), "");
+}
+
+TEST_F(MountArchiveTest, AnImageInsideAnArchiveMountsFromItsDosPath)
+{
+	const auto zip = Built("cd.zip",
+	                       Kind::ZipStored,
+	                       {{"GAME.EXE", "MZ"}, {"cd/game.iso", ArchiveFixtures::MinimalIso()}});
+	ASSERT_TRUE(Mount("E " + zip.string()).has_value());
+	ASSERT_TRUE(Mount("F E:\\CD\\GAME.ISO -t iso").has_value());
+	EXPECT_TRUE(Drives.at(drive_index('F')));
+}
+
+// A typed image path is a host file first and an archive drive's member only
+// when no host file has that name, as ResolveHostPath does for folders.
+TEST_F(MountArchiveTest, AHostImageWinsOverAMemberOfTheSameName)
+{
+	const auto zip = Built("cd.zip",
+	                       Kind::ZipStored,
+	                       {{"GAME.EXE", "MZ"}, {"GAME.ISO", ArchiveFixtures::MinimalIso()}});
+	ASSERT_TRUE(Mount("E " + zip.string()).has_value());
+	const auto host_dir = tmp / "host";
+	std::filesystem::create_directories(host_dir);
+	const auto iso = ArchiveFixtures::MinimalIso();
+	std::ofstream(host_dir / "GAME.ISO", std::ios::binary)
+	        .write(iso.data(), static_cast<std::streamsize>(iso.size()));
+
+	const auto old_cwd = std::filesystem::current_path();
+	std::filesystem::current_path(host_dir);
+	DOS_SetDefaultDrive(drive_index('E'));
+	const auto mounted = Mount("F GAME.ISO -t iso");
+	std::filesystem::current_path(old_cwd);
+
+	ASSERT_TRUE(mounted.has_value());
+	ASSERT_EQ(mounted->paths.size(), 1u);
+	EXPECT_EQ(std::filesystem::weakly_canonical(host_dir / mounted->paths[0]),
+	          std::filesystem::canonical(host_dir / "GAME.ISO"));
+}
+
+// A file the game wrote lives in the sidecar; the mapping names that copy.
+TEST_F(MountArchiveTest, AFileInTheSidecarMapsToItsHostCopy)
+{
+	const auto zip = Built("cd.zip", Kind::ZipStored, {{"GAME.EXE", "MZ"}});
+	ASSERT_TRUE(Mount("E " + zip.string()).has_value());
+	auto file = Drives.at(drive_index('E'))->FileCreate("GAME.EXE", {});
+	ASSERT_TRUE(file);
+	file->Close();
+	const auto mapped = MOUNT::HostPathOfDosPath("E:\\GAME.EXE");
+	EXPECT_TRUE(std::filesystem::is_regular_file(mapped)) << mapped;
+	EXPECT_EQ(std::filesystem::path(mapped).filename(), "GAME.EXE");
+}
+
+TEST_F(MountArchiveTest, RunOnADriveNotMountedRunsNothing)
+{
+	EXPECT_FALSE(Mount("E -run GAME.EXE -exit").has_value());
+	EXPECT_TRUE(SHELL_TakePendingCommands().empty());
+	EXPECT_FALSE(DriveAt('E'));
 }
 
 // The menu lists a folder's game before a root setup; the one program at
@@ -2625,6 +3073,37 @@ TEST_F(MountArchiveTest, ExitIsQueuedOnlyBehindAProgram)
 	ASSERT_TRUE(Mount("F " + three.string() + " -exit -run").has_value());
 	EXPECT_EQ(SHELL_TakePendingCommands(),
 	          (std::vector<std::string>{"F:", "F:\\GAME.EXE", "EXIT"}));
+}
+
+// unimenu = off: -run opens no menu for several programs, the drive stays
+// mounted and the prompt is where the user lands.
+TEST_F(MountArchiveTest, UnimenuOffOpensNoMenu)
+{
+	MountBundledY();
+	Set("unimenu", "off");
+	const auto two = Built("two.zip", Kind::ZipStored, TwoPrograms());
+	ASSERT_TRUE(Mount("E " + two.string() + " -run -exit").has_value());
+	EXPECT_TRUE(SHELL_TakePendingCommands().empty());
+	EXPECT_FALSE(MenuSession::IsOpen());
+	EXPECT_TRUE(Drives.at('E' - 'A'));
+	Set("unimenu", "on");
+}
+
+// An autostart entry of CHOOSER.TML is no menu: it runs with unimenu = off.
+TEST_F(MountArchiveTest, UnimenuOffKeepsTheChoosersAutostart)
+{
+	MountBundledY();
+	Set("unimenu", "off");
+	auto entries = TwoPrograms();
+	entries.push_back({"CHOOSER.TML",
+	                   "[[entry]]\nlabel = \"Play\"\nexe = \"GAME.EXE\"\n"
+	                   "autostart = true\n"
+	                   "[[entry]]\nlabel = \"Setup\"\nexe = \"SETUP.EXE\"\n"});
+	const auto zip = Built("chooser.zip", Kind::ZipStored, entries);
+	ASSERT_TRUE(Mount("E " + zip.string() + " -run").has_value());
+	EXPECT_EQ(SHELL_TakePendingCommands(),
+	          (std::vector<std::string>{"E:", "E:\\GAME.EXE"}));
+	Set("unimenu", "on");
 }
 
 TEST_F(MountArchiveTest, ExitWithoutRunIsRefused)

@@ -79,10 +79,28 @@ private:
 
 	void ParseArguments();
 
+	std::vector<std::string> ParseConfigLines(
+	        const std::function<bool(std::string&)>& next_line,
+	        const std::string& config_file_name,
+	        const std::function<std::optional<std::string>(const std::string&)>&
+	                autoexec_line                            = {},
+	        const std::vector<std::string>& ignored_sections = {});
+
 public:
 	std::vector<std::string> startup_params                 = {};
 	std::vector<std::string> config_files                   = {};
+	// A conf from the command line's archive or game folder was loaded after
+	// the local conf, and its MOUNT lines mount some drive and C: (ada-0lv8).
+	bool package_conf_loaded  = false;
+	bool package_is_folder    = false;
+	bool package_mounts_drive = false;
+	bool package_mounts_c     = false;
+	// Its [autoexec] is empty or ends with C:.
+	bool package_ends_at_prompt = false;
 	std::vector<std_fs::path> loaded_config_paths_canonical = {};
+	// The last -conf file or local dosbox.conf, never the primary conf: the
+	// mount policy's anchor (ada-fl3c).
+	std_fs::path anchor_config_path = {};
 
 	Config(CommandLine* cmd)
 	        : cmdline(cmd),
@@ -137,7 +155,28 @@ public:
 	bool ParseConfigFile(const std::string& type,
 	                     const std::string& config_file_name);
 
-	void ParseConfigFiles(const std_fs::path& config_path);
+	// Returns the line to keep, or none to leave it out.
+	using AutoexecLine = std::function<std::optional<std::string>(const std::string&)>;
+
+	// A conf that is no host file, read as ParseConfigFile reads one with
+	// relative paths from base_dir; [autoexec] lines pass autoexec_line. An
+	// ignored section or "section.key" is dropped, and the keys are returned.
+	std::vector<std::string> ParseConfigText(
+	        const std::string& type, const std::string& config_name,
+	        std::string_view text, const std_fs::path& base_dir,
+	        const AutoexecLine& autoexec_line                = {},
+	        const std::vector<std::string>& ignored_sections = {});
+
+	// The --set commands; with only, just the settings it accepts by
+	// section and key.
+	void ApplySetCommands(
+	        const std::vector<std::string>& set_args, bool report_problems = true,
+	        const std::function<bool(const std::string& section,
+	                                 const std::string& key)>& only = {});
+
+	// after_local runs between the local dosbox.conf and the -conf files.
+	void ParseConfigFiles(const std_fs::path& config_path,
+	                      const std::function<void()>& after_local = {});
 
 	std::string SetPropertyFromCli(std::vector<std::string>& parameters);
 

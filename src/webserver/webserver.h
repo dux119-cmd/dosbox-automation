@@ -6,11 +6,15 @@
 #define DOSBOX_WEBSERVER_H
 
 #include <charconv>
+#include <cstdint>
+#include <exception>
 #include <functional>
 #include <limits>
 #include <optional>
+#include <stdexcept>
 #include <string>
 #include <string_view>
+#include <vector>
 
 #include "http/http.h"
 #include "nlohmann/json_fwd.hpp"
@@ -70,6 +74,19 @@ static T num_param(const httplib::Request& req, Source src, const std::string& n
 }
 
 void send_json(httplib::Response& res, const nlohmann::json& j);
+
+// A linear address the guest's page tables do not grant (ada-q50n).
+class GuestPageNotMapped : public std::runtime_error {
+public:
+	explicit GuestPageNotMapped(const uint32_t address)
+	        : std::runtime_error("guest page not mapped"),
+	          address(address)
+	{}
+	uint32_t address = 0;
+};
+
+// BridgeBusy maps to 503 with Retry-After, GuestPageNotMapped to 409.
+void ErrorResponse(std::exception_ptr ep, httplib::Response& res);
 
 // True when a request may bypass the bearer-token check: a GET/HEAD for one of
 // the fixed documentation assets (landing page, API explorer, openapi spec,

@@ -25,6 +25,7 @@
 #include "audio/mixer.h"
 #include "capture/capture.h"
 #include "config/config.h"
+#include "config/host_only.h"
 #include "config/setup.h"
 #include "cpu/callback.h"
 #include "cpu/cpu.h"
@@ -74,6 +75,7 @@
 #include "shell/autoexec.h"
 #include "shell/shell.h"
 #include "utils/math_utils.h"
+#include "utils/string_utils.h"
 #include "webserver/bridge.h"
 #include "webserver/webserver.h"
 
@@ -570,6 +572,9 @@ void DOSBOX_Restart(std::vector<std::string>& parameters)
 {
 	control->ApplyQueuedValuesToCli(parameters);
 
+	// The restarted engine keeps this one's REST API (ada-rafi)
+	HostOnly::ApplyRestartPins(parameters);
+
 	// Remove any existing --waitpid parameters.
 	// This can happen with multiple restarts.
 	remove_waitpid(parameters);
@@ -593,7 +598,7 @@ void DOSBOX_Restart(std::vector<std::string>& parameters)
 		// arguments in double quotes, otherwise things will break if
 		// one or more arguments contain spaces.
 		//
-		command_line.append("\"" + arg + "\"");
+		command_line.append(quote_windows_argument(arg));
 		first = false;
 	}
 #else
