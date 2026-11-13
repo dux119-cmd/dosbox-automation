@@ -280,6 +280,13 @@ if (OPT_PDB)
   add_link_options(/DEBUG /OPT:REF /OPT:ICF)
 endif()
 
+# Builds against src/utils/expected.h's fallback where <expected> exists, to
+# test on any host what a library without it (libstdc++ 11) compiles.
+option(OPT_EXPECTED_FALLBACK "Use the std::expected fallback everywhere" OFF)
+if (OPT_EXPECTED_FALLBACK)
+  add_compile_definitions(DOSBOX_EXPECTED_FALLBACK)
+endif()
+
 # Check host endianness
 if (CMAKE_CXX_BYTE_ORDER STREQUAL BIG_ENDIAN)
   message(FATAL_ERROR "Big-endian architectures are not supported")

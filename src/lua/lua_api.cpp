@@ -430,7 +430,7 @@ static bool IsTextMode()
 	return INT10_IsTextMode(*CurMode);
 }
 
-std::expected<std::string, PhysPt> ReadScreenText()
+Expected<std::string, PhysPt> ReadScreenText()
 {
 	if (!IsTextMode()) {
 		return {};
@@ -439,7 +439,7 @@ std::expected<std::string, PhysPt> ReadScreenText()
 	constexpr PhysPt BiosDataArea  = BIOSMEM_SEG << 4;
 	std::array<uint8_t, 0x100> bda = {};
 	if (const auto read = GuestMemory::Read(BiosDataArea, bda); !read) {
-		return std::unexpected(read.error());
+		return MakeUnexpected(read.error());
 	}
 	const auto bda_word = [&](const size_t offset) {
 		return bda[offset] | (bda[offset + 1] << 8);
@@ -462,7 +462,7 @@ std::expected<std::string, PhysPt> ReadScreenText()
 	const auto cells = static_cast<size_t>(rows) * static_cast<size_t>(cols) * 2;
 	std::vector<uint8_t> buffer(cells);
 	if (const auto read = GuestMemory::Read(page_base, buffer); !read) {
-		return std::unexpected(read.error());
+		return MakeUnexpected(read.error());
 	}
 
 	std::string result;

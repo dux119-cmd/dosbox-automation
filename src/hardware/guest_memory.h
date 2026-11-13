@@ -7,11 +7,11 @@
 
 #include <cstddef>
 #include <cstdint>
-#include <expected>
 #include <span>
 #include <vector>
 
 #include "hardware/memory.h"
+#include "utils/expected.h"
 
 // Guest memory as the host side (API, Lua, freezes) reaches it, by linear
 // address. A page the guest's tables do not grant is reported, never raised
@@ -30,17 +30,16 @@ struct Range {
 // paging off; with paging on the whole 4 GB, and the page tables decide.
 uint64_t AddressLimit();
 
-std::expected<void, PhysPt> CheckRange(PhysPt start, size_t len, bool writing);
+Expected<void, PhysPt> CheckRange(PhysPt start, size_t len, bool writing);
 
-std::expected<void, PhysPt> Read(PhysPt start, std::span<uint8_t> out);
+Expected<void, PhysPt> Read(PhysPt start, std::span<uint8_t> out);
 
 // Writes nothing unless every page of the range accepts the write.
-std::expected<void, PhysPt> Write(PhysPt start, std::span<const uint8_t> data);
+Expected<void, PhysPt> Write(PhysPt start, std::span<const uint8_t> data);
 
 // Fills `out` from every readable page and zeroes the rest; returns the
 // skipped ranges, merged and clipped to the request.
-std::expected<std::vector<Range>, PhysPt> ReadMapped(PhysPt start,
-                                                     std::span<uint8_t> out);
+Expected<std::vector<Range>, PhysPt> ReadMapped(PhysPt start, std::span<uint8_t> out);
 
 } // namespace GuestMemory
 

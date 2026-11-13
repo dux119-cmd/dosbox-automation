@@ -178,6 +178,7 @@ add_executable(dosbox_tests
     guest_memory_tests.cpp
     webserver_memory_paging_tests.cpp
     guest_memory_callers_tests.cpp
+    expected_tests.cpp
     webserver_dos_map_tests.cpp
     webserver_io_port_tests.cpp
     webserver_cpu_write_tests.cpp

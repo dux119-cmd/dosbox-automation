@@ -36,11 +36,11 @@ uint64_t AddressLimit()
 	             : static_cast<uint64_t>(MEM_TotalPages()) * MemPageSize;
 }
 
-std::expected<void, PhysPt> CheckRange(const PhysPt start, const size_t len,
-                                       const bool writing)
+Expected<void, PhysPt> CheckRange(const PhysPt start, const size_t len,
+                                  const bool writing)
 {
 	if (!FitsAddressSpace(start, len)) {
-		return std::unexpected(start);
+		return MakeUnexpected(start);
 	}
 	if (len == 0) {
 		return {};
@@ -49,13 +49,13 @@ std::expected<void, PhysPt> CheckRange(const PhysPt start, const size_t len,
 	for (auto page = PageOf(start); page < end; page += MemPageSize) {
 		if (!PAGING_HostCanAccess(static_cast<PhysPt>(page), writing)) {
 			const auto refused = std::max<uint64_t>(page, start);
-			return std::unexpected(static_cast<PhysPt>(refused));
+			return MakeUnexpected(static_cast<PhysPt>(refused));
 		}
 	}
 	return {};
 }
 
-std::expected<void, PhysPt> Read(const PhysPt start, const std::span<uint8_t> out)
+Expected<void, PhysPt> Read(const PhysPt start, const std::span<uint8_t> out)
 {
 	if (const auto checked = CheckRange(start, out.size(), false); !checked) {
 		return checked;
@@ -64,8 +64,7 @@ std::expected<void, PhysPt> Read(const PhysPt start, const std::span<uint8_t> ou
 	return {};
 }
 
-std::expected<void, PhysPt> Write(const PhysPt start,
-                                  const std::span<const uint8_t> data)
+Expected<void, PhysPt> Write(const PhysPt start, const std::span<const uint8_t> data)
 {
 	if (const auto checked = CheckRange(start, data.size(), true); !checked) {
 		return checked;
@@ -74,12 +73,12 @@ std::expected<void, PhysPt> Write(const PhysPt start,
 	return {};
 }
 
-std::expected<std::vector<Range>, PhysPt> ReadMapped(const PhysPt start,
-                                                     const std::span<uint8_t> out)
+Expected<std::vector<Range>, PhysPt> ReadMapped(const PhysPt start,
+                                                const std::span<uint8_t> out)
 {
 	// Range::end is exclusive and 32 bits wide, so the last byte stays out.
 	if (static_cast<uint64_t>(start) + out.size() >= AddressSpaceEnd) {
-		return std::unexpected(start);
+		return MakeUnexpected(start);
 	}
 	std::ranges::fill(out, uint8_t{0});
 
